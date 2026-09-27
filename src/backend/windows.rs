@@ -1,18 +1,23 @@
 #![allow(unsafe_code)]
 
 use std::ptr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
+    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WM_QUIT,
 };
+use windows_sys::core::BOOL;
 
 use crate::backend::Backend;
 use crate::backend::hook::{self, Decision, HookInput};
@@ -24,6 +29,26 @@ struct HookState {
 }
 
 static STATE: OnceLock<HookState> = OnceLock::new();
+static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+
+struct HookGuard(HHOOK);
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        unsafe { UnhookWindowsHookEx(self.0) };
+    }
+}
+
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
+        if thread_id != 0 {
+            unsafe { PostThreadMessageW(thread_id, WM_QUIT, 0, 0) };
+        }
+        return 1;
+    }
+    0
+}
 
 #[cfg(feature = "testing")]
 static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -46,7 +71,6 @@ impl WindowsBackend {
 
     #[cfg(feature = "testing")]
     pub fn wait_ready(timeout: std::time::Duration) -> bool {
-        use std::sync::atomic::Ordering;
         use std::time::Instant;
 
         let deadline = Instant::now() + timeout;
@@ -72,6 +96,7 @@ impl Backend for WindowsBackend {
             engine: Mutex::new(engine),
             test_tag: self.test_tag,
         });
+        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
         let module = unsafe { GetModuleHandleW(ptr::null()) };
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0) };
         if hook.is_null() {
@@ -80,8 +105,15 @@ impl Backend for WindowsBackend {
                 std::io::Error::last_os_error()
             );
         }
+        let hook = HookGuard(hook);
+        if unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 1) } == 0 {
+            eprintln!(
+                "patpans: SetConsoleCtrlHandler failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         #[cfg(feature = "testing")]
-        READY.store(true, std::sync::atomic::Ordering::SeqCst);
+        READY.store(true, Ordering::SeqCst);
         eprintln!(
             "patpans: low-level keyboard hook installed, toggle: {}",
             toggle_name()
@@ -97,7 +129,8 @@ impl Backend for WindowsBackend {
                 DispatchMessageW(&raw const message);
             }
         }
-        unsafe { UnhookWindowsHookEx(hook) };
+        drop(hook);
+        HOOK_THREAD.store(0, Ordering::SeqCst);
         Ok(())
     }
 }
