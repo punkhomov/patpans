@@ -1,6 +1,12 @@
 use std::collections::HashMap;
 
+use smallvec::SmallVec;
+
 use crate::keys::Key;
+
+/// Output of one physical event. Two slots cover every single-group override,
+/// so the common case never touches the heap.
+pub type Events = SmallVec<[Event; 2]>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
@@ -44,7 +50,7 @@ struct GroupState {
 pub struct Engine {
     groups: Vec<Group>,
     states: Vec<GroupState>,
-    index: HashMap<Key, Vec<usize>>,
+    index: HashMap<Key, SmallVec<[usize; 2]>>,
     toggle: Option<Key>,
     toggle_held: bool,
     sticky: bool,
@@ -53,7 +59,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(groups: Vec<Group>, toggle: Option<Key>, sticky: bool) -> Self {
-        let mut index: HashMap<Key, Vec<usize>> = HashMap::new();
+        let mut index: HashMap<Key, SmallVec<[usize; 2]>> = HashMap::new();
         for (group_index, group) in groups.iter().enumerate() {
             for key in group.keys {
                 index.entry(key).or_default().push(group_index);
@@ -83,9 +89,9 @@ impl Engine {
         self.sticky
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) -> Vec<Event> {
+    pub fn set_enabled(&mut self, enabled: bool) -> Events {
         if enabled == self.enabled {
-            return Vec::new();
+            return Events::new();
         }
         self.enabled = enabled;
         if enabled {
@@ -95,20 +101,20 @@ impl Engine {
         }
     }
 
-    pub fn handle(&mut self, event: Event) -> Vec<Event> {
+    pub fn handle(&mut self, event: Event) -> Events {
         if self.toggle == Some(event.key) {
             return self.handle_toggle(event);
         }
         let Some(group_ids) = self.index.get(&event.key).cloned() else {
-            return vec![event];
+            return Events::from_slice(&[event]);
         };
         if !self.enabled {
             for group_id in group_ids {
                 self.track_physical(group_id, event);
             }
-            return vec![event];
+            return Events::from_slice(&[event]);
         }
-        let mut out = Vec::new();
+        let mut out = Events::new();
         for group_id in group_ids {
             let Some(slot) = self.group_slot(group_id, event.key) else {
                 continue;
@@ -121,16 +127,16 @@ impl Engine {
         out
     }
 
-    fn handle_toggle(&mut self, event: Event) -> Vec<Event> {
+    fn handle_toggle(&mut self, event: Event) -> Events {
         match event.edge {
             Edge::Press if !self.toggle_held => {
                 self.toggle_held = true;
                 self.set_enabled(!self.enabled)
             }
-            Edge::Press => Vec::new(),
+            Edge::Press => Events::new(),
             Edge::Release => {
                 self.toggle_held = false;
-                Vec::new()
+                Events::new()
             }
         }
     }
@@ -146,7 +152,7 @@ impl Engine {
         }
     }
 
-    fn on_press(&mut self, group_id: usize, slot: usize, out: &mut Vec<Event>) {
+    fn on_press(&mut self, group_id: usize, slot: usize, out: &mut Events) {
         let key = self.groups[group_id].keys[slot];
         let state = &mut self.states[group_id];
         if state.held[slot] {
@@ -171,7 +177,7 @@ impl Engine {
         push_unique(out, Event::new(key, Edge::Press));
     }
 
-    fn on_release(&mut self, group_id: usize, slot: usize, out: &mut Vec<Event>) {
+    fn on_release(&mut self, group_id: usize, slot: usize, out: &mut Events) {
         let key = self.groups[group_id].keys[slot];
         let state = &mut self.states[group_id];
         if !state.held[slot] {
@@ -220,8 +226,8 @@ impl Engine {
         }
     }
 
-    fn resync_active(&mut self) -> Vec<Event> {
-        let mut out = Vec::new();
+    fn resync_active(&mut self) -> Events {
+        let mut out = Events::new();
         for (group_id, state) in self.states.iter_mut().enumerate() {
             state.active = Self::compute_active(state);
             if let Some(active) = state.active {
@@ -238,8 +244,8 @@ impl Engine {
         out
     }
 
-    fn restore_physical(&mut self) -> Vec<Event> {
-        let mut out = Vec::new();
+    fn restore_physical(&mut self) -> Events {
+        let mut out = Events::new();
         for (group_id, state) in self.states.iter_mut().enumerate() {
             if let Some(active) = state.active {
                 for slot in 0..2 {
@@ -300,7 +306,7 @@ impl Engine {
     }
 }
 
-fn push_unique(out: &mut Vec<Event>, event: Event) {
+fn push_unique(out: &mut Events, event: Event) {
     if !out.contains(&event) {
         out.push(event);
     }
@@ -319,17 +325,17 @@ mod tests {
     fn unmanaged_keys_are_returned_unchanged() {
         let mut engine = Engine::new(Vec::new(), None, true);
         let event = Event::new(key("P"), Edge::Press);
-        assert_eq!(engine.handle(event), vec![event]);
+        assert_eq!(engine.handle(event), Events::from_slice(&[event]));
     }
 
     #[test]
     fn set_enabled_is_idempotent() {
         let mut engine = Engine::new(Vec::new(), None, true);
-        assert_eq!(engine.set_enabled(true), Vec::<Event>::new());
+        assert_eq!(engine.set_enabled(true), Events::new());
         assert!(engine.enabled());
-        assert_eq!(engine.set_enabled(false), Vec::<Event>::new());
+        assert_eq!(engine.set_enabled(false), Events::new());
         assert!(!engine.enabled());
-        assert_eq!(engine.set_enabled(false), Vec::<Event>::new());
+        assert_eq!(engine.set_enabled(false), Events::new());
     }
 
     #[test]
@@ -363,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             engine.handle(Event::new(key("A"), Edge::Press)),
-            vec![Event::new(key("A"), Edge::Press)]
+            Events::from_slice(&[Event::new(key("A"), Edge::Press)])
         );
     }
 
@@ -372,7 +378,7 @@ mod tests {
         let mut engine = Engine::new(vec![Group::new(key("A"), key("D"))], None, true);
         assert_eq!(
             engine.handle(Event::new(key("A"), Edge::Press)),
-            vec![Event::new(key("A"), Edge::Press)]
+            Events::from_slice(&[Event::new(key("A"), Edge::Press)])
         );
         let held = engine.held_keys();
         assert_eq!(held, vec![key("A")]);
@@ -381,21 +387,21 @@ mod tests {
         next.resync_held(&held);
         assert_eq!(
             next.handle(Event::new(key("D"), Edge::Press)),
-            vec![
+            Events::from_slice(&[
                 Event::new(key("A"), Edge::Release),
                 Event::new(key("D"), Edge::Press),
-            ]
+            ])
         );
         assert_eq!(
             next.handle(Event::new(key("D"), Edge::Release)),
-            vec![
+            Events::from_slice(&[
                 Event::new(key("D"), Edge::Release),
                 Event::new(key("A"), Edge::Press),
-            ]
+            ])
         );
         assert_eq!(
             next.handle(Event::new(key("A"), Edge::Release)),
-            vec![Event::new(key("A"), Edge::Release)]
+            Events::from_slice(&[Event::new(key("A"), Edge::Release)])
         );
     }
 

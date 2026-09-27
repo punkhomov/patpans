@@ -1,9 +1,10 @@
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::config::FileConfig;
+use crate::config::{Config, FileConfig};
 use crate::ipc::StatusInfo;
 use crate::keys::{self, Key};
 
@@ -13,7 +14,10 @@ use super::settings::Settings;
 pub struct PatpansApp {
     settings: Settings,
     saved: Settings,
+    config_path: PathBuf,
+    config_error: Option<String>,
     status: Option<StatusInfo>,
+    status_error: Option<String>,
     message: Option<(String, bool)>,
     capture_rx: Option<mpsc::Receiver<anyhow::Result<Option<String>>>>,
     next_poll: Instant,
@@ -27,14 +31,21 @@ impl Default for PatpansApp {
 
 impl PatpansApp {
     pub fn new() -> Self {
-        let config = FileConfig::load(&bridge::config_path())
-            .and_then(FileConfig::into_config)
-            .unwrap_or_default();
-        let settings = Settings::from_config(&config);
+        let config_path = bridge::config_path();
+        let (settings, config_error) = match load_settings(&config_path) {
+            Ok(settings) => (settings, None),
+            Err(err) => (
+                Settings::from_config(&Config::default()),
+                Some(format!("{err:#}")),
+            ),
+        };
         Self {
             saved: settings.clone(),
             settings,
+            config_path,
+            config_error,
             status: None,
+            status_error: None,
             message: None,
             capture_rx: None,
             next_poll: Instant::now(),
@@ -43,7 +54,17 @@ impl PatpansApp {
 
     fn poll(&mut self, ctx: &egui::Context) {
         if Instant::now() >= self.next_poll {
-            self.status = bridge::status();
+            match bridge::status() {
+                Ok(status) => {
+                    self.status_error = None;
+                    self.adopt_daemon_config(&status);
+                    self.status = Some(status);
+                }
+                Err(err) => {
+                    self.status = None;
+                    self.status_error = Some(err.message());
+                }
+            }
             self.next_poll = Instant::now() + Duration::from_millis(500);
         }
         if let Some(rx) = &self.capture_rx
@@ -66,6 +87,37 @@ impl PatpansApp {
 
     fn set_message(&mut self, text: String, error: bool) {
         self.message = Some((text, error));
+    }
+
+    fn adopt_daemon_config(&mut self, status: &StatusInfo) {
+        let path = PathBuf::from(&status.config_path);
+        let changed = path != self.config_path;
+        if changed {
+            self.config_path = path;
+        }
+        if self.settings != self.saved {
+            if changed {
+                self.set_message(
+                    format!(
+                        "the daemon uses {}; unsaved edits will be saved there",
+                        self.config_path.display()
+                    ),
+                    false,
+                );
+            }
+            return;
+        }
+        if !changed && self.config_error.is_none() {
+            return;
+        }
+        match load_settings(&self.config_path) {
+            Ok(settings) => {
+                self.saved = settings.clone();
+                self.settings = settings;
+                self.config_error = None;
+            }
+            Err(err) => self.config_error = Some(format!("{err:#}")),
+        }
     }
 
     fn apply(&mut self, result: anyhow::Result<StatusInfo>) {
@@ -116,7 +168,11 @@ impl PatpansApp {
                 }
             });
         } else {
-            ui.label("daemon is not running");
+            if let Some(err) = &self.status_error {
+                ui.colored_label(egui::Color32::from_rgb(190, 70, 70), err);
+            } else {
+                ui.label("daemon is not running");
+            }
             ui.horizontal(|ui| {
                 if ui.button("Start daemon").clicked() {
                     self.apply_unit(bridge::start_daemon());
@@ -171,22 +227,25 @@ impl PatpansApp {
             self.settings.groups.remove(index);
         }
         if ui.button("Add group").clicked() {
-            let pair = [
-                keys::by_name("A").unwrap_or(keys::KEYS[0]),
-                keys::by_name("D").unwrap_or(keys::KEYS[1]),
-            ];
-            self.settings.groups.push(pair);
+            self.settings
+                .groups
+                .push([keys::default_key("A"), keys::default_key("D")]);
         }
     }
 
     fn footer_ui(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let dirty = self.settings != self.saved;
+        let can_save = dirty && self.config_error.is_none();
         ui.horizontal(|ui| {
-            if ui.add_enabled(dirty, egui::Button::new("Save")).clicked() {
-                match bridge::save_settings(&self.settings) {
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save"))
+                .clicked()
+            {
+                match bridge::save_settings(&self.settings, &self.config_path) {
                     Ok(()) => {
                         self.saved = self.settings.clone();
+                        self.config_error = None;
                         self.set_message("saved".to_string(), false);
                         if self.status.is_some() {
                             self.apply(bridge::reload());
@@ -195,8 +254,14 @@ impl PatpansApp {
                     Err(err) => self.set_message(format!("{err:#}"), true),
                 }
             }
-            ui.label(format!("config: {}", bridge::config_path().display()));
+            ui.label(format!("config: {}", self.config_path.display()));
         });
+        if let Some(err) = &self.config_error {
+            ui.colored_label(
+                egui::Color32::from_rgb(190, 70, 70),
+                format!("config file error: {err} — saving is disabled until the file is fixed"),
+            );
+        }
         if let Some((text, error)) = &self.message {
             let color = if *error {
                 egui::Color32::from_rgb(190, 70, 70)
@@ -234,4 +299,10 @@ fn key_combo(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, key:
                 ui.selectable_value(key, *candidate, candidate.name);
             }
         });
+}
+
+fn load_settings(path: &Path) -> anyhow::Result<Settings> {
+    Ok(Settings::from_config(
+        &FileConfig::load(path)?.into_config()?,
+    ))
 }

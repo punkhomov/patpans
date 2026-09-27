@@ -62,9 +62,15 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        FileConfig::default()
-            .into_config()
-            .expect("the built-in default config is valid")
+        Self {
+            toggle: Some(keys::default_key("F8")),
+            sticky: true,
+            tray: true,
+            groups: vec![
+                Group::new(keys::default_key("A"), keys::default_key("D")),
+                Group::new(keys::default_key("W"), keys::default_key("S")),
+            ],
+        }
     }
 }
 

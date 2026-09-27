@@ -18,7 +18,7 @@
 
 ## Требования
 
-- Rust nightly — `rust-toolchain.toml` фиксирует канал (MSRV 1.90 из-за `tray-icon` 0.25).
+- Rust nightly — `rust-toolchain.toml` фиксирует канал (MSRV 1.95: столько требует `eframe`/`egui` для feature `gui`).
 - Linux: доступ к `/dev/input/*` и `/dev/uinput` (root или группа `input` + udev-правило), ядро с `uinput`. Трей работает через D-Bus (`ksni`-бэкенд, GTK не нужен); без сессионного D-Bus `run` предупредит и продолжит без иконки.
 - Windows: дополнительных драйверов не нужно; если игра запущена от администратора, patpans тоже нужно запускать от администратора.
 
@@ -38,7 +38,7 @@ cargo run -- simulate --builtin sticky
 cargo run -- check
 ```
 
-Конфиг по умолчанию — `patpans.toml` рядом с исполняемым файлом (создаётся при первом `run`); лог пишется в `patpans.log` там же. Путь можно переопределить флагом `--config <PATH>` или переменной `PAT_PANS_SOCKET`/`PAT_PANS_PIPE` для IPC-эндпоинта.
+Конфиг по умолчанию — `patpans.toml` рядом с исполняемым файлом (создаётся при первом `run`); лог пишется в `patpans.log` там же (при достижении 1 МиБ ротируется в `patpans.log.old`). Путь можно переопределить флагом `--config <PATH>`, IPC-эндпоинт — флагом `--socket <ENDPOINT>` или переменной `PAT_PANS_SOCKET`/`PAT_PANS_PIPE`.
 
 ## GUI
 
@@ -51,7 +51,8 @@ cargo build --release --features gui   # соберёт patpans-gui и patpans
 - трей принадлежит демону, GUI его не создаёт; закрытие окна не останавливает перехват;
 - запуск демона из GUI идёт без окна консоли (Windows), лог — в `patpans.log` рядом с конфигом;
 - GUI ищет `patpans`/`patpans.exe` рядом с собой, поэтому в portable-сборке держите оба файла вместе;
-- «Start as administrator» (Windows) перезапускает демон через UAC — нужно для игр под elevation.
+- «Start as administrator» (Windows) перезапускает демон через UAC — нужно для игр под elevation; демону передаются `--config` и `--socket`, так что кастомные пути не теряются;
+- Save пишет в тот конфиг, с которым работает демон (путь берётся из статуса), а не в файл по умолчанию; если файл не парсится, GUI показывает ошибку и блокирует сохранение поверх.
 
 ## Релизы
 
@@ -60,7 +61,7 @@ GitHub Actions (`.github/workflows/ci.yml`) на каждый push в `main` с�
 - `patpans-portable-windows-x86_64.zip` — `patpans.exe`, `patpans-gui.exe`, пример конфига, README;
 - `patpans-portable-linux-x86_64.tar.gz` — `patpans`, `patpans-gui`, пример конфига, README.
 
-Там же гоняются линты, тесты и QEMU-e2e (Linux), а на Windows — хук-тест и сборка GUI.
+Там же гоняются линты, тесты и QEMU-e2e (Linux), а на Windows — сборка GUI и хук-тест (шаг advisory: для него нужен интерактивный десктоп).
 
 ## Конфиг (`patpans.toml`)
 
@@ -89,7 +90,7 @@ min-publish-age = "14 days"
 
 ## Тестирование
 
-Логика покрыта 44 тестами (включая модель настроек GUI): юнит-тесты (правила хука, портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
+Логика покрыта 45 тестами (включая модель настроек GUI): юнит-тесты (правила хука, портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
 
 Подробный отчёт: что именно проверено, как воспроизвести, что не покрыто — в [TESTING.md](TESTING.md).
 

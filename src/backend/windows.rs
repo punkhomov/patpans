@@ -1,10 +1,5 @@
-#![expect(
-    unsafe_code,
-    reason = "direct Win32 FFI: low-level hook, message pump, SendInput and console handler"
-)]
-
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 
 use anyhow::{Result, bail};
@@ -30,12 +25,13 @@ use crate::engine::{Edge, Engine, Event};
 use crate::keys::Key;
 
 const WAKE_MESSAGE: u32 = 0x8000 + 3;
+const NO_TEST_TAG: usize = usize::MAX;
 
 struct HookState {
     engine: Mutex<Engine>,
     capture: Mutex<Option<mpsc::Sender<Option<Key>>>>,
     control: Mutex<Option<Control>>,
-    test_tag: Option<usize>,
+    test_tag: AtomicUsize,
 }
 
 static STATE: OnceLock<HookState> = OnceLock::new();
@@ -45,12 +41,17 @@ static CONSOLE_HANDLER: AtomicBool = AtomicBool::new(false);
 struct HookGuard(HHOOK);
 
 impl Drop for HookGuard {
+    #[expect(unsafe_code, reason = "unhook the Win32 keyboard hook exactly once")]
     fn drop(&mut self) {
         // SAFETY: the handle was returned by SetWindowsHookExW and is unhooked exactly once.
         unsafe { UnhookWindowsHookEx(self.0) };
     }
 }
 
+#[expect(
+    unsafe_code,
+    reason = "console control handler is invoked by the Win32 runtime"
+)]
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
         let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
@@ -126,8 +127,12 @@ impl Default for WindowsBackend {
 
 #[allow(clippy::too_many_lines)]
 impl Backend for WindowsBackend {
+    #[expect(unsafe_code, reason = "Win32 hook installation and message pump")]
     fn run(&mut self, engine: Engine) -> Result<()> {
         let enabled = engine.enabled();
+        #[cfg(feature = "testing")]
+        READY.store(false, Ordering::SeqCst);
+        let test_tag = self.test_tag.unwrap_or(NO_TEST_TAG);
         if let Some(state) = STATE.get() {
             let Ok(mut current) = state.engine.lock() else {
                 bail!("the engine lock is poisoned");
@@ -136,12 +141,16 @@ impl Backend for WindowsBackend {
             if let Ok(mut control) = state.control.lock() {
                 (*control).clone_from(&self.control);
             }
+            if let Ok(mut capture) = state.capture.lock() {
+                *capture = None;
+            }
+            state.test_tag.store(test_tag, Ordering::SeqCst);
         } else {
             let _ = STATE.set(HookState {
                 engine: Mutex::new(engine),
                 capture: Mutex::new(None),
                 control: Mutex::new(self.control.clone()),
-                test_tag: self.test_tag,
+                test_tag: AtomicUsize::new(test_tag),
             });
         }
         // SAFETY: returns the id of the calling thread; no preconditions.
@@ -223,6 +232,7 @@ fn toggle_name() -> String {
         .map_or_else(|| "none".to_string(), |key| key.to_string())
 }
 
+#[expect(unsafe_code, reason = "post WM_QUIT to the hook thread")]
 fn handle_commands(commands: Option<&mpsc::Receiver<Command>>) {
     let Some(commands) = commands else {
         return;
@@ -317,6 +327,10 @@ pub(crate) fn handle_menu_command(command: &str) {
     }
 }
 
+#[expect(
+    unsafe_code,
+    reason = "read the KBDLLHOOKSTRUCT passed to the hook callback"
+)]
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 {
         return call_next(code, wparam, lparam);
@@ -333,7 +347,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         injected: info.flags & LLKHF_INJECTED != 0,
         tag: info.dwExtraInfo,
     };
-    let Some((key, edge)) = hook::relevant(&input, state.test_tag) else {
+    let tag = state.test_tag.load(Ordering::SeqCst);
+    let tag = (tag != NO_TEST_TAG).then_some(tag);
+    let Some((key, edge)) = hook::relevant(&input, tag) else {
         return call_next(code, wparam, lparam);
     };
     if edge == Edge::Press {
@@ -371,11 +387,13 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     }
 }
 
+#[expect(unsafe_code, reason = "pass the event through the Win32 hook chain")]
 fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: passing the original arguments through to the next hook is always valid.
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
 
+#[expect(unsafe_code, reason = "synthesize keyboard events with SendInput")]
 fn send_input(events: &[Event]) {
     let inputs: Vec<INPUT> = events
         .iter()

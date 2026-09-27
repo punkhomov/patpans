@@ -33,6 +33,12 @@ mod platform {
         static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
     }
 
+    /// Creates the tray icon on the calling thread.
+    ///
+    /// `tray-icon` owns a hidden window on this thread, so the caller has to run
+    /// a message pump (the Windows backend does). Explorer restarts need no help
+    /// from us: the crate retries registration when the taskbar is not ready yet
+    /// and re-registers on the `TaskbarCreated` broadcast.
     pub fn start(enabled: bool) -> Result<()> {
         let on = icon(true)?;
         let off = icon(false)?;

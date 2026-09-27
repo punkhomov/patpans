@@ -46,8 +46,12 @@ impl Control {
 
     pub fn send(&self, command: Command) -> bool {
         let sent = self.tx.send(command).is_ok();
-        if sent && let Some(wake) = self.wake.get() {
-            wake();
+        if sent {
+            if let Some(wake) = self.wake.get() {
+                wake();
+            }
+        } else {
+            crate::log!("patpans: control command dropped — the backend is not running");
         }
         sent
     }

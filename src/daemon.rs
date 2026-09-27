@@ -1,6 +1,6 @@
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -12,7 +12,12 @@ use crate::config::{Config, FileConfig};
 use crate::control::{Command, Control};
 use crate::engine::Engine;
 use crate::ipc::{self, Request, Response, StatusInfo};
-use crate::{log, paths};
+use crate::log;
+
+const MAX_CLIENTS: usize = 32;
+const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct Options {
     pub config_path: PathBuf,
@@ -26,11 +31,12 @@ struct Shared {
     config_path: PathBuf,
     tray: bool,
     shutdown: mpsc::Sender<()>,
+    clients: AtomicUsize,
 }
 
 pub struct Daemon {
     shared: Arc<Shared>,
-    endpoint: Option<String>,
+    listener: Arc<ipc::transport::Listener>,
     backend: Option<JoinHandle<Result<()>>>,
     accept: Option<JoinHandle<()>>,
     accept_stop: Arc<AtomicBool>,
@@ -42,8 +48,15 @@ impl Daemon {
     where
         F: FnOnce(Control, mpsc::Receiver<Command>) -> Result<Box<dyn Backend>> + Send + 'static,
     {
-        let listener = ipc::transport::listen(options.endpoint.as_deref())
-            .context("failed to start the daemon IPC endpoint")?;
+        let Options {
+            config_path,
+            endpoint,
+            tray,
+        } = options;
+        let listener = Arc::new(
+            ipc::transport::listen(endpoint.as_deref())
+                .context("failed to start the daemon IPC endpoint")?,
+        );
         let (command_tx, command_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let status = Arc::new(AtomicBool::new(true));
@@ -51,9 +64,10 @@ impl Daemon {
         let shared = Arc::new(Shared {
             control: control.clone(),
             config: Mutex::new(config.clone()),
-            config_path: options.config_path.clone(),
-            tray: options.tray,
+            config_path,
+            tray,
             shutdown: shutdown_tx.clone(),
+            clients: AtomicUsize::new(0),
         });
 
         let engine = Engine::new(config.groups, config.toggle, config.sticky);
@@ -71,8 +85,9 @@ impl Daemon {
         let accept_stop = Arc::new(AtomicBool::new(false));
         let accept_shared = Arc::clone(&shared);
         let accept_stop_thread = Arc::clone(&accept_stop);
+        let accept_listener = Arc::clone(&listener);
         let accept = thread::spawn(move || {
-            accept_loop(&listener, &accept_shared, &accept_stop_thread);
+            accept_loop(&accept_listener, &accept_shared, &accept_stop_thread);
         });
 
         log!(
@@ -81,7 +96,7 @@ impl Daemon {
         );
         Ok(Self {
             shared,
-            endpoint: options.endpoint,
+            listener,
             backend: Some(backend),
             accept: Some(accept),
             accept_stop,
@@ -104,7 +119,7 @@ impl Daemon {
 
     pub fn shutdown(&mut self) -> Result<()> {
         self.accept_stop.store(true, Ordering::SeqCst);
-        let _ = ipc::transport::connect(self.endpoint.as_deref());
+        let _ = self.listener.wake();
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
@@ -124,12 +139,23 @@ impl Daemon {
 fn accept_loop(listener: &ipc::transport::Listener, shared: &Arc<Shared>, stop: &Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
+                if shared.clients.load(Ordering::SeqCst) >= MAX_CLIENTS {
+                    let _ = ipc::write_response(
+                        &mut stream,
+                        &Response::error("too many concurrent IPC clients"),
+                    );
+                    continue;
+                }
+                shared.clients.fetch_add(1, Ordering::SeqCst);
                 let shared = Arc::clone(shared);
-                thread::spawn(move || handle_client(stream, &shared));
+                thread::spawn(move || {
+                    handle_client(stream, &shared);
+                    shared.clients.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             Err(err) => {
                 log!("patpans: ipc accept error: {err}");
@@ -139,17 +165,32 @@ fn accept_loop(listener: &ipc::transport::Listener, shared: &Arc<Shared>, stop: 
     }
 }
 
-fn handle_client(stream: ipc::transport::Stream, shared: &Shared) {
+fn handle_client(mut stream: ipc::transport::Stream, shared: &Shared) {
+    let _ = stream.set_read_timeout(Some(CLIENT_IDLE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
     let mut reader = BufReader::new(stream);
     loop {
-        let request = match ipc::read_request(&mut reader) {
-            Ok(Some(request)) => request,
+        let envelope = match ipc::read_request(&mut reader) {
+            Ok(Some(envelope)) => envelope,
             Ok(None) => break,
+            Err(err) if is_timeout(&err) => break,
             Err(err) => {
                 let _ = ipc::write_response(reader.get_mut(), &Response::error(format!("{err:#}")));
                 break;
             }
         };
+        if envelope.version != ipc::PROTOCOL_VERSION {
+            let _ = ipc::write_response(
+                reader.get_mut(),
+                &Response::error(format!(
+                    "protocol version mismatch: the client speaks v{} and this daemon speaks v{}",
+                    envelope.version,
+                    ipc::PROTOCOL_VERSION
+                )),
+            );
+            break;
+        }
+        let request = envelope.request;
         let stop_after = matches!(request, Request::Stop);
         let response = dispatch(&request, shared);
         if ipc::write_response(reader.get_mut(), &response).is_err() {
@@ -161,23 +202,28 @@ fn handle_client(stream: ipc::transport::Stream, shared: &Shared) {
     }
 }
 
+fn is_timeout(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<io::Error>().is_some_and(|err| {
+        matches!(
+            err.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        )
+    })
+}
+
 fn dispatch(request: &Request, shared: &Shared) -> Response {
     match request {
         Request::Ping => Response::ok(),
         Request::Status => Response::with_status(status_info(shared)),
-        Request::Toggle => {
-            if apply(shared, Command::Toggle) {
-                Response::with_status(status_info(shared))
-            } else {
-                Response::error("the daemon is shutting down")
-            }
-        }
+        Request::Toggle => match apply(shared, Command::Toggle) {
+            Ok(()) => Response::with_status(status_info(shared)),
+            Err(err) => Response::error(err.message()),
+        },
         Request::SetEnabled { enabled } => {
             let enabled = *enabled;
-            if apply(shared, move |reply| Command::SetEnabled(enabled, reply)) {
-                Response::with_status(status_info(shared))
-            } else {
-                Response::error("the daemon is shutting down")
+            match apply(shared, move |reply| Command::SetEnabled(enabled, reply)) {
+                Ok(()) => Response::with_status(status_info(shared)),
+                Err(err) => Response::error(err.message()),
             }
         }
         Request::Reload => match reload(shared) {
@@ -187,7 +233,7 @@ fn dispatch(request: &Request, shared: &Shared) -> Response {
         Request::CaptureKey => {
             let (reply_tx, reply_rx) = mpsc::channel();
             if !shared.control.send(Command::Capture(reply_tx)) {
-                return Response::error("the daemon is shutting down");
+                return Response::error(ApplyError::ShuttingDown.message());
             }
             if let Ok(key) = reply_rx.recv_timeout(Duration::from_secs(5)) {
                 Response::with_key(key.map(|key| key.name.to_string()))
@@ -204,12 +250,31 @@ fn dispatch(request: &Request, shared: &Shared) -> Response {
     }
 }
 
-fn apply(shared: &Shared, make: impl FnOnce(mpsc::Sender<()>) -> Command) -> bool {
+enum ApplyError {
+    ShuttingDown,
+    Timeout,
+}
+
+impl ApplyError {
+    const fn message(&self) -> &'static str {
+        match self {
+            Self::ShuttingDown => "the daemon is shutting down",
+            Self::Timeout => "the daemon did not respond in time",
+        }
+    }
+}
+
+fn apply(
+    shared: &Shared,
+    make: impl FnOnce(mpsc::Sender<()>) -> Command,
+) -> Result<(), ApplyError> {
     let (reply_tx, reply_rx) = mpsc::channel();
     if !shared.control.send(make(reply_tx)) {
-        return false;
+        return Err(ApplyError::ShuttingDown);
     }
-    reply_rx.recv_timeout(Duration::from_secs(1)).is_ok()
+    reply_rx
+        .recv_timeout(REPLY_TIMEOUT)
+        .map_err(|_| ApplyError::Timeout)
 }
 
 fn reload(shared: &Shared) -> Result<()> {
@@ -218,12 +283,12 @@ fn reload(shared: &Shared) -> Result<()> {
     }
     let file = FileConfig::load(&shared.config_path)?;
     let config = file.into_config()?;
+    let next = config.clone();
+    apply(shared, move |reply| Command::Replace(Box::new(next), reply))
+        .map_err(|err| anyhow::anyhow!("{}; the settings were not applied", err.message()))?;
     if let Ok(mut current) = shared.config.lock() {
-        *current = config.clone();
+        *current = config;
     }
-    apply(shared, move |reply| {
-        Command::Replace(Box::new(config), reply)
-    });
     log!(
         "patpans: settings reloaded from {}",
         shared.config_path.display()
@@ -304,8 +369,4 @@ pub fn default_options(config_path: PathBuf, tray: bool) -> Options {
         endpoint: None,
         tray,
     }
-}
-
-pub fn log_path_for(config_path: &std::path::Path) -> PathBuf {
-    paths::default_log_path(config_path)
 }

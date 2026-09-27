@@ -1,4 +1,4 @@
-use crate::engine::{Edge, Engine, Event};
+use crate::engine::{Edge, Engine, Event, Events};
 use crate::keys::{self, Key};
 
 pub const WM_KEYDOWN: u32 = 0x0100;
@@ -18,7 +18,7 @@ pub struct HookInput {
 pub enum Decision {
     Pass,
     Swallow,
-    Inject(Vec<Event>),
+    Inject(Events),
 }
 
 pub const fn edge_from_message(message: u32) -> Option<Edge> {
@@ -128,7 +128,7 @@ mod tests {
         let decision = decide(&mut engine, key("D"), Edge::Press);
         assert_eq!(
             decision,
-            Decision::Inject(vec![
+            Decision::Inject(smallvec::smallvec![
                 Event::new(key("A"), Edge::Release),
                 Event::new(key("D"), Edge::Press),
             ])

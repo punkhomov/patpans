@@ -24,6 +24,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
+    /// Override the IPC endpoint (Unix socket path or Windows pipe name)
+    #[arg(long, global = true, value_name = "ENDPOINT")]
+    socket: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -85,17 +89,18 @@ struct SimArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let config_path = cli.config.unwrap_or_else(paths::default_config_path);
+    let endpoint = cli.socket.as_deref();
     let result = match &cli.command {
-        Some(Command::Run(args)) => cmd_run(&config_path, args),
-        Some(Command::Status) => cmd_status(),
-        Some(Command::Toggle) => cmd_request(&Request::Toggle),
-        Some(Command::Enable) => cmd_request(&Request::SetEnabled { enabled: true }),
-        Some(Command::Disable) => cmd_request(&Request::SetEnabled { enabled: false }),
-        Some(Command::Reload) => cmd_request(&Request::Reload),
-        Some(Command::Stop) => cmd_request(&Request::Stop),
+        Some(Command::Run(args)) => cmd_run(&config_path, args, endpoint),
+        Some(Command::Status) => cmd_status(endpoint),
+        Some(Command::Toggle) => cmd_request(&Request::Toggle, endpoint),
+        Some(Command::Enable) => cmd_request(&Request::SetEnabled { enabled: true }, endpoint),
+        Some(Command::Disable) => cmd_request(&Request::SetEnabled { enabled: false }, endpoint),
+        Some(Command::Reload) => cmd_request(&Request::Reload, endpoint),
+        Some(Command::Stop) => cmd_request(&Request::Stop, endpoint),
         Some(Command::Simulate(args)) => cmd_simulate(&config_path, args),
         Some(Command::Check) => cmd_check(&config_path),
-        None => cmd_run(&config_path, &RunArgs::default()),
+        None => cmd_run(&config_path, &RunArgs::default(), endpoint),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -136,7 +141,7 @@ fn managed_keys(config: &Config) -> Vec<patpans::Key> {
     keys
 }
 
-fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
+fn cmd_run(path: &Path, args: &RunArgs, endpoint: Option<&str>) -> Result<()> {
     if !path.exists() {
         FileConfig::default()
             .save(path)
@@ -154,7 +159,7 @@ fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
     let managed = managed_keys(&config);
     let options = daemon::Options {
         config_path: path.to_path_buf(),
-        endpoint: None,
+        endpoint: endpoint.map(str::to_owned),
         tray,
     };
     let daemon = daemon::Daemon::spawn(config, options, move |control, commands| {
@@ -163,8 +168,8 @@ fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
     daemon.wait()
 }
 
-fn cmd_status() -> Result<()> {
-    let mut client = Client::connect(None)?;
+fn cmd_status(endpoint: Option<&str>) -> Result<()> {
+    let mut client = Client::connect(endpoint)?;
     let status = status_of(client.request(&Request::Status)?)?;
     println!("patpans {} — daemon running", status.version);
     println!("  interception: {}", label(status.enabled));
@@ -188,9 +193,9 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-fn cmd_request(request: &Request) -> Result<()> {
+fn cmd_request(request: &Request, endpoint: Option<&str>) -> Result<()> {
     let stop = matches!(request, Request::Stop);
-    let mut client = Client::connect(None)?;
+    let mut client = Client::connect(endpoint)?;
     let response = client.request(request)?;
     if stop {
         if response.ok {

@@ -1,5 +1,7 @@
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use patpans::backend::sim::SimBackend;
 use patpans::config::{Config, FileConfig};
@@ -91,6 +93,40 @@ fn ipc_round_trip() {
     assert!(captured.key.is_none());
 
     assert!(client.request(&Request::Ping).unwrap().ok);
+    assert!(client.request(&Request::Stop).unwrap().ok);
+    daemon.wait().unwrap();
+    let _ = std::fs::remove_file(&config_path);
+}
+
+#[test]
+fn protocol_version_mismatch_is_reported() {
+    let endpoint = unique_endpoint("version");
+    let config_path = temp_config_path("version");
+    let daemon = spawn_daemon(&endpoint, config_path.clone(), Config::default());
+
+    let mut stream = patpans::ipc::transport::connect(Some(&endpoint)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    writeln!(
+        reader.get_mut(),
+        r#"{{"version":999,"request":{{"cmd":"status"}}}}"#
+    )
+    .unwrap();
+    reader.get_mut().flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let response: patpans::ipc::Response = serde_json::from_str(&line).unwrap();
+    assert!(!response.ok);
+    assert!(
+        response
+            .error
+            .unwrap_or_default()
+            .contains("protocol version mismatch")
+    );
+
+    let mut client = Client::connect(Some(&endpoint)).unwrap();
     assert!(client.request(&Request::Stop).unwrap().ok);
     daemon.wait().unwrap();
     let _ = std::fs::remove_file(&config_path);
