@@ -3,12 +3,12 @@ use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::engine::Group;
 use crate::keys::{self, Key};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     #[serde(default = "default_toggle")]
@@ -59,6 +59,14 @@ pub struct Config {
     pub groups: Vec<Group>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        FileConfig::default()
+            .into_config()
+            .expect("the built-in default config is valid")
+    }
+}
+
 impl FileConfig {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
@@ -69,6 +77,12 @@ impl FileConfig {
                 Err(err).with_context(|| format!("failed to read config `{}`", path.display()))
             }
         }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self).context("failed to serialize the config")?;
+        fs::write(path, text)
+            .with_context(|| format!("failed to write config `{}`", path.display()))
     }
 
     pub fn into_config(self) -> Result<Config> {

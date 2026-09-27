@@ -11,6 +11,8 @@
 - Клавиши вне групп проходят без изменений, автоповтор пробрасывается только для активной клавиши.
 - Хоткей вкл/выкл (по умолчанию `F8`) с корректным ресинком состояния при переключении.
 - Бэкенды: Linux (`evdev` + `uinput`), Windows (низкоуровневый хук `WH_KEYBOARD_LL` + `SendInput`, без драйверов).
+- Демон + клиенты: перехват живёт в демоне, CLI (и будущий GUI) — клиенты по локальному сокету: `status`, `toggle`, `enable`, `disable`, `reload`, `stop`.
+- Portable: конфиг и лог рядом с исполняемым файлом, без установки и реестра; single-instance через сокет/мьютекс.
 - Системный трей (`tray-icon`): иконка on/off, галочка «Snap Tap enabled» и «Quit patpans» в меню; состояние синхронизировано с хоткеем `F8`. Отключается флагом `--no-tray` или `tray = false`.
 - Режим `simulate` — прогон сценария без железа; `check` — валидация конфига и диагностика окружения.
 
@@ -25,11 +27,18 @@
 ```console
 cargo build --release
 
-cargo run -- run                    # демон с конфигом patpans.toml
+cargo run -- run                    # демон: перехват + IPC + трей
+cargo run -- status                 # состояние демона
+cargo run -- toggle                 # вкл/выкл перехват
+cargo run -- enable                 # включить
+cargo run -- disable                # выключить
+cargo run -- reload                 # перечитать конфиг
+cargo run -- stop                   # остановить демон
 cargo run -- simulate --builtin sticky
-cargo run -- simulate --script "A+ D+ A- D-"
 cargo run -- check
 ```
+
+Конфиг по умолчанию — `patpans.toml` рядом с исполняемым файлом (создаётся при первом `run`); лог пишется в `patpans.log` там же. Путь можно переопределить флагом `--config <PATH>` или переменной `PAT_PANS_SOCKET`/`PAT_PANS_PIPE` для IPC-эндпоинта.
 
 ## Конфиг (`patpans.toml`)
 
@@ -58,7 +67,7 @@ min-publish-age = "14 days"
 
 ## Тестирование
 
-Логика покрыта 32 тестами: юнит-тесты (включая кроссплатформенные правила хука) и интеграционные сценарии на симуляторе. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`), Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
+Логика покрыта 37 тестами: юнит-тесты (включая кроссплатформенные правила хука и портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
 
 Подробный отчёт: что именно проверено, как воспроизвести, что не покрыто — в [TESTING.md](TESTING.md).
 

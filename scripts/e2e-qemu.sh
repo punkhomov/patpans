@@ -18,7 +18,7 @@ command -v cpio >/dev/null || { echo "error: cpio is missing (apt install cpio)"
 rustup target list --installed | grep -q "^$TARGET$" || rustup target add "$TARGET"
 cargo build --release --target "$TARGET" --test linux_uinput_e2e
 
-TESTBIN=$(find "target/$TARGET" -path '*/out/linux_uinput_e2e-*' -type f -perm -u+x ! -name '*.d' | head -1)
+TESTBIN=$(find "target/$TARGET" -path '*/out/linux_uinput_e2e-*' -type f -perm -u+x ! -name '*.d' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
 [ -n "$TESTBIN" ] || { echo "error: e2e test binary not found" >&2; exit 1; }
 
 rm -rf "$WORKDIR"

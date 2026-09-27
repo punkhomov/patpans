@@ -6,8 +6,13 @@
 
 pub mod backend;
 pub mod config;
+pub mod control;
+pub mod daemon;
 pub mod engine;
+pub mod ipc;
 pub mod keys;
+pub mod logging;
+pub mod paths;
 mod tray;
 
 pub use config::Config;

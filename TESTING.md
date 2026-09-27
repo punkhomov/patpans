@@ -6,13 +6,22 @@
 
 | Уровень | Что проверяет | Команда |
 | --- | --- | --- |
-| Юнит-тесты (21) | таблица клавиш и алиасы, парсинг/валидация конфига, парсер скриптов, toggle, правила хука (кроссплатформенные), стресс-тест на 80k событий | `cargo test` |
+| Юнит-тесты (23) | таблица клавиш и алиасы, парсинг/валидация конфига, парсер скриптов, toggle, правила хука (кроссплатформенные), портативные пути, стресс-тест на 80k событий | `cargo test` |
 | Интеграционные (10) | сценарии SOCD на симуляторе: перекрытие, sticky, тапы, независимость групп, автоповтор, toggle, ресинк при включении, non-sticky | `cargo test` |
-| Linux E2E (1, QEMU) | настоящие `uinput`-клавиатуры, `grab` через evdev, полный production-путь `LinuxBackend` | `./scripts/e2e-qemu.sh` |
+| Демон и IPC (2) | headless-демон с sim-бэкендом: status/toggle/enable/reload/capture/stop, single-instance | `cargo test --test daemon_ipc` |
+| Linux E2E (2, QEMU) | настоящие `uinput`-клавиатуры, `grab` через evdev, полный production-путь `LinuxBackend`, цикл Stop/Start | `./scripts/e2e-qemu.sh` |
 | Windows E2E (1, feature `testing`) | низкоуровневый хук на живом Windows: перекрытие, toggle, отсутствие эхо-цикла | `cargo test --features testing --test windows_hook_e2e` |
 | Сборка и линты | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build --release` | — |
 | Кросс-сборка | компиляция Windows-бэкенда | `cargo check --target x86_64-pc-windows-gnu` |
 | min-publish-age | фильтрация свежих версий зависимостей | см. раздел ниже |
+
+## Демон и IPC
+
+- Транспорт: Unix-сокет (`$XDG_RUNTIME_DIR/patpans.sock`, права 0600; fallback `/tmp/patpans-<uid>.sock`) на Linux, именованный пайп `patpans` на Windows; эндпоинт переопределяется `PAT_PANS_SOCKET` / `PAT_PANS_PIPE`.
+- Протокол: JSON-lines, команды `ping/status/toggle/set_enabled/reload/capture_key/stop`.
+- `tests/daemon_ipc.rs` поднимает демон с `SimBackend` (без железа) и проверяет полный цикл по сокету, включая `reload` из файла, capture (в sim возвращает `null`) и отказ второго демона на том же эндпоинте.
+- Файловый лог (`patpans.log` рядом с конфигом) инициализируется в `run`; в тестах не проверяется.
+- Не покрыто: named pipe в рантайме (только компиляция под Windows), права сокета при sudo-демоне, silent-запуск без консоли (появится вместе с GUI).
 
 ## E2E через QEMU
 
@@ -42,6 +51,8 @@
 - второй `F8+ F8-` → `W-` — при включении активной становится последняя нажатая (`S`), а виртуально отпущенная `W` получает release (ресинк состояния ОС, регрессия на «залипание» при включении);
 - `W-` → ничего — физическое отпускание уже отпущенной виртуально клавиши подавляется;
 - `S-` → `S-` — активная клавиша отпускается штатно.
+
+Второй тест (`stop_releases_the_keyboard_and_start_grabs_again`) проверяет жизненный цикл: `Stop` через управляющий канал возвращает `run`, uinput-устройство исчезает, а повторный старт снова захватывает клавиатуру и обрабатывает ввод.
 
 Последний прогон: `test result: ok. 1 passed`, `E2E_EXIT=0`, `e2e: OK`. Полный лог сохраняется в `/tmp/patpans-e2e/qemu.log`.
 

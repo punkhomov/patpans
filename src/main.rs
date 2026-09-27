@@ -1,11 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use patpans::backend::sim::SimBackend;
 use patpans::backend::{self, Backend};
 use patpans::config::{self, FileConfig};
+use patpans::daemon;
+use patpans::ipc::{Client, Request, Response, StatusInfo};
+use patpans::logging;
+use patpans::paths;
 use patpans::{BUILTIN_SCENARIOS, Config, Edge, Engine, Event};
 
 #[derive(Parser)]
@@ -13,12 +17,12 @@ use patpans::{BUILTIN_SCENARIOS, Config, Edge, Engine, Event};
     name = "patpans",
     version,
     about = "Software Snap Tap (SOCD cleaner): the last pressed key wins for opposing movement keys",
-    after_help = "Built-in scenarios: run, sticky, taps, groups, repeat, passthrough, toggle\nExamples:\n  patpans run\n  patpans simulate --builtin sticky\n  patpans simulate --script \"A+ D+ A- D-\""
+    after_help = "Built-in scenarios: run, sticky, taps, groups, repeat, passthrough, toggle\nExamples:\n  patpans run\n  patpans status\n  patpans simulate --builtin sticky\n  patpans simulate --script \"A+ D+ A- D-\""
 )]
 struct Cli {
-    /// Path to the TOML config file (defaults are used when it is missing)
-    #[arg(short, long, global = true, default_value = "patpans.toml")]
-    config: PathBuf,
+    /// Path to the TOML config file (default: patpans.toml next to the executable)
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -26,8 +30,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the snap tap daemon (needs root or the `input` group on Linux)
+    /// Run the daemon (keyboard interception, IPC and tray)
     Run(RunArgs),
+    /// Print the daemon status
+    Status,
+    /// Toggle interception on or off
+    Toggle,
+    /// Enable interception
+    Enable,
+    /// Disable interception
+    Disable,
+    /// Reload the config in the running daemon
+    Reload,
+    /// Stop the running daemon
+    Stop,
     /// Replay an input script through the engine; no real keyboard needed
     Simulate(SimArgs),
     /// Validate the config and report usable keyboard devices
@@ -68,11 +84,18 @@ struct SimArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let config_path = cli.config.unwrap_or_else(paths::default_config_path);
     let result = match &cli.command {
-        Some(Command::Run(args)) => cmd_run(&cli.config, args),
-        Some(Command::Simulate(args)) => cmd_simulate(&cli.config, args),
-        Some(Command::Check) => cmd_check(&cli.config),
-        None => cmd_run(&cli.config, &RunArgs::default()),
+        Some(Command::Run(args)) => cmd_run(&config_path, args),
+        Some(Command::Status) => cmd_status(),
+        Some(Command::Toggle) => cmd_request(&Request::Toggle),
+        Some(Command::Enable) => cmd_request(&Request::SetEnabled { enabled: true }),
+        Some(Command::Disable) => cmd_request(&Request::SetEnabled { enabled: false }),
+        Some(Command::Reload) => cmd_request(&Request::Reload),
+        Some(Command::Stop) => cmd_request(&Request::Stop),
+        Some(Command::Simulate(args)) => cmd_simulate(&config_path, args),
+        Some(Command::Check) => cmd_check(&config_path),
+        None => cmd_run(&config_path, &RunArgs::default()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -114,6 +137,11 @@ fn managed_keys(config: &Config) -> Vec<patpans::Key> {
 }
 
 fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
+    if !path.exists() {
+        FileConfig::default()
+            .save(path)
+            .with_context(|| format!("failed to create `{}`", path.display()))?;
+    }
     let mut config = load_config(path)?;
     apply_overrides(
         &mut config,
@@ -121,11 +149,76 @@ fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
         args.toggle.as_deref(),
         args.no_sticky,
     )?;
-    let keys = managed_keys(&config);
-    let engine = Engine::new(config.groups, config.toggle, config.sticky);
     let tray = config.tray && !args.no_tray;
-    let mut backend = backend::default_backend(&keys, tray)?;
-    backend.run(engine)
+    logging::init(Some(&paths::default_log_path(path)));
+    let managed = managed_keys(&config);
+    let options = daemon::Options {
+        config_path: path.to_path_buf(),
+        endpoint: None,
+        tray,
+    };
+    let daemon = daemon::Daemon::spawn(config, options, move |control, commands| {
+        backend::default_backend(&managed, tray, control, commands)
+    })?;
+    daemon.wait()
+}
+
+fn cmd_status() -> Result<()> {
+    let mut client = Client::connect(None)?;
+    let status = status_of(client.request(&Request::Status)?)?;
+    println!("patpans {} — daemon running", status.version);
+    println!("  interception: {}", label(status.enabled));
+    println!(
+        "  elevated:     {}",
+        if status.elevated { "yes" } else { "no" }
+    );
+    println!(
+        "  toggle key:   {}",
+        status.toggle.as_deref().unwrap_or("none")
+    );
+    println!(
+        "  sticky:       {}",
+        if status.sticky { "yes" } else { "no" }
+    );
+    println!("  tray:         {}", if status.tray { "yes" } else { "no" });
+    println!("  config:       {}", status.config_path);
+    for (index, group) in status.groups.iter().enumerate() {
+        println!("  group #{}:     {}, {}", index + 1, group[0], group[1]);
+    }
+    Ok(())
+}
+
+fn cmd_request(request: &Request) -> Result<()> {
+    let stop = matches!(request, Request::Stop);
+    let mut client = Client::connect(None)?;
+    let response = client.request(request)?;
+    if stop {
+        if response.ok {
+            println!("daemon stopped");
+            return Ok(());
+        }
+        return Err(anyhow::anyhow!(response.error.unwrap_or_else(|| {
+            "the daemon rejected the request".to_string()
+        })));
+    }
+    let status = status_of(response)?;
+    println!("snap tap: {}", label(status.enabled));
+    Ok(())
+}
+
+fn status_of(response: Response) -> Result<StatusInfo> {
+    if !response.ok {
+        bail!(
+            response
+                .error
+                .unwrap_or_else(|| "the daemon rejected the request".to_string())
+        );
+    }
+    response.status.context("the daemon returned no status")
+}
+
+const fn label(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
 }
 
 fn cmd_simulate(path: &Path, args: &SimArgs) -> Result<()> {
@@ -205,10 +298,12 @@ fn cmd_check(path: &Path) -> Result<()> {
         .toggle
         .map_or_else(|| "none".to_string(), |key| key.to_string());
     println!(
-        "config: {} group(s), toggle: {toggle}, sticky: {}",
+        "config: {} group(s), toggle: {toggle}, sticky: {}, tray: {}",
         config.groups.len(),
-        config.sticky
+        config.sticky,
+        config.tray
     );
+    println!("config path: {}", path.display());
     for (index, group) in config.groups.iter().enumerate() {
         println!(
             "  group #{}: {}, {}",

@@ -1,8 +1,8 @@
 #![allow(unsafe_code)]
 
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock, mpsc};
 
 use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -21,15 +21,23 @@ use windows_sys::core::BOOL;
 
 use crate::backend::Backend;
 use crate::backend::hook::{self, Decision, HookInput};
+use crate::config::Config;
+use crate::control::{Command, Control};
 use crate::engine::{Edge, Engine, Event};
+use crate::keys::Key;
+
+const WAKE_MESSAGE: u32 = 0x8000 + 3;
 
 struct HookState {
     engine: Mutex<Engine>,
+    capture: Mutex<Option<mpsc::Sender<Option<Key>>>>,
+    control: Mutex<Option<Control>>,
     test_tag: Option<usize>,
 }
 
 static STATE: OnceLock<HookState> = OnceLock::new();
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+static CONSOLE_HANDLER: AtomicBool = AtomicBool::new(false);
 
 struct HookGuard(HHOOK);
 
@@ -51,11 +59,13 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 #[cfg(feature = "testing")]
-static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static READY: AtomicBool = AtomicBool::new(false);
 
 pub struct WindowsBackend {
     test_tag: Option<usize>,
     tray: bool,
+    control: Option<Control>,
+    commands: Option<mpsc::Receiver<Command>>,
 }
 
 impl WindowsBackend {
@@ -63,12 +73,21 @@ impl WindowsBackend {
         Self {
             test_tag: None,
             tray: false,
+            control: None,
+            commands: None,
         }
     }
 
     #[must_use]
     pub const fn with_tray(mut self, tray: bool) -> Self {
         self.tray = tray;
+        self
+    }
+
+    #[must_use]
+    pub fn with_control(mut self, control: Control, commands: mpsc::Receiver<Command>) -> Self {
+        self.control = Some(control);
+        self.commands = Some(commands);
         self
     }
 
@@ -100,14 +119,36 @@ impl Default for WindowsBackend {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 impl Backend for WindowsBackend {
     fn run(&mut self, engine: Engine) -> Result<()> {
         let enabled = engine.enabled();
-        STATE.get_or_init(|| HookState {
-            engine: Mutex::new(engine),
-            test_tag: self.test_tag,
-        });
+        if let Some(state) = STATE.get() {
+            let Ok(mut current) = state.engine.lock() else {
+                bail!("the engine lock is poisoned");
+            };
+            *current = engine;
+            if let Ok(mut control) = state.control.lock() {
+                (*control).clone_from(&self.control);
+            }
+        } else {
+            let _ = STATE.set(HookState {
+                engine: Mutex::new(engine),
+                capture: Mutex::new(None),
+                control: Mutex::new(self.control.clone()),
+                test_tag: self.test_tag,
+            });
+        }
         HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+        if let Some(control) = &self.control {
+            control.set_wake(|| {
+                let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
+                if thread_id != 0 {
+                    unsafe { PostThreadMessageW(thread_id, WAKE_MESSAGE, 0, 0) };
+                }
+            });
+            control.set_status(enabled);
+        }
         let module = unsafe { GetModuleHandleW(ptr::null()) };
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0) };
         if hook.is_null() {
@@ -117,8 +158,10 @@ impl Backend for WindowsBackend {
             );
         }
         let hook = HookGuard(hook);
-        if unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 1) } == 0 {
-            eprintln!(
+        if !CONSOLE_HANDLER.swap(true, Ordering::SeqCst)
+            && unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 1) } == 0
+        {
+            crate::log!(
                 "patpans: SetConsoleCtrlHandler failed: {}",
                 std::io::Error::last_os_error()
             );
@@ -128,9 +171,9 @@ impl Backend for WindowsBackend {
         if self.tray
             && let Err(err) = crate::tray::start(enabled)
         {
-            eprintln!("patpans: tray unavailable: {err:#}");
+            crate::log!("patpans: tray unavailable: {err:#}");
         }
-        eprintln!(
+        crate::log!(
             "patpans: low-level keyboard hook installed, toggle: {}",
             toggle_name()
         );
@@ -140,6 +183,10 @@ impl Backend for WindowsBackend {
             if result <= 0 {
                 break;
             }
+            if message.message == WAKE_MESSAGE {
+                handle_commands(self.commands.as_ref());
+                continue;
+            }
             unsafe {
                 TranslateMessage(&raw const message);
                 DispatchMessageW(&raw const message);
@@ -148,7 +195,7 @@ impl Backend for WindowsBackend {
         crate::tray::shutdown();
         drop(hook);
         HOOK_THREAD.store(0, Ordering::SeqCst);
-        eprintln!("patpans: keyboard hook removed, exiting");
+        crate::log!("patpans: keyboard hook removed, exiting");
         Ok(())
     }
 }
@@ -161,24 +208,90 @@ fn toggle_name() -> String {
         .map_or_else(|| "none".to_string(), |key| key.to_string())
 }
 
+fn handle_commands(commands: Option<&mpsc::Receiver<Command>>) {
+    let Some(commands) = commands else {
+        return;
+    };
+    while let Ok(command) = commands.try_recv() {
+        match command {
+            Command::Toggle(reply) => apply_enabled(None, &reply),
+            Command::SetEnabled(value, reply) => apply_enabled(Some(value), &reply),
+            Command::Replace(config, reply) => apply_config(&config, &reply),
+            Command::Capture(reply) => set_capture(Some(reply)),
+            Command::CaptureCancel => set_capture(None),
+            Command::Stop => unsafe { PostQuitMessage(0) },
+        }
+    }
+}
+
+fn apply_enabled(target: Option<bool>, reply: &mpsc::Sender<()>) {
+    let Some(state) = STATE.get() else {
+        let _ = reply.send(());
+        return;
+    };
+    let Ok(mut engine) = state.engine.lock() else {
+        let _ = reply.send(());
+        return;
+    };
+    let enabled = target.unwrap_or(!engine.enabled());
+    let out = engine.set_enabled(enabled);
+    update_status(state, &engine);
+    crate::log!("patpans: snap tap {}", state_label(engine.enabled()));
+    drop(engine);
+    send_input(&out);
+    let _ = reply.send(());
+}
+
+fn apply_config(config: &Config, reply: &mpsc::Sender<()>) {
+    if let Some(state) = STATE.get()
+        && let Ok(mut engine) = state.engine.lock()
+    {
+        *engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+        update_status(state, &engine);
+    }
+    crate::log!("patpans: settings applied");
+    let _ = reply.send(());
+}
+
+fn set_capture(reply: Option<mpsc::Sender<Option<Key>>>) {
+    if let Some(state) = STATE.get()
+        && let Ok(mut capture) = state.capture.lock()
+    {
+        *capture = reply;
+    }
+}
+
+fn update_status(state: &HookState, engine: &Engine) {
+    crate::tray::reflect(engine.enabled());
+    if let Ok(control) = state.control.lock()
+        && let Some(control) = control.as_ref()
+    {
+        control.set_status(engine.enabled());
+    }
+}
+
+const fn state_label(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
+}
+
 pub(crate) fn handle_menu_command(command: &str) {
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    let Ok(control) = state.control.lock() else {
+        return;
+    };
+    let Some(control) = control.as_ref() else {
+        return;
+    };
     match command {
         "toggle" => {
-            let Some(state) = STATE.get() else {
-                return;
-            };
-            let Ok(mut engine) = state.engine.lock() else {
-                return;
-            };
-            let target = !engine.enabled();
-            let out = engine.set_enabled(target);
-            crate::tray::reflect(engine.enabled());
-            let state = if engine.enabled() { "ON" } else { "OFF" };
-            eprintln!("patpans: snap tap {state}");
-            drop(engine);
-            send_input(&out);
+            let (reply, _) = mpsc::channel();
+            control.send(Command::Toggle(reply));
         }
-        "quit" => unsafe { PostQuitMessage(0) },
+        "quit" => {
+            control.send(Command::Stop);
+        }
         _ => {}
     }
 }
@@ -200,6 +313,18 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some((key, edge)) = hook::relevant(&input, state.test_tag) else {
         return call_next(code, wparam, lparam);
     };
+    if edge == Edge::Press {
+        let capture = state.capture.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(reply) = capture {
+            let _ = reply.send(Some(key));
+            return 1;
+        }
+    }
+    let control = state
+        .control
+        .lock()
+        .ok()
+        .and_then(|control| control.clone());
     let Ok(mut engine) = state.engine.lock() else {
         return call_next(code, wparam, lparam);
     };
@@ -207,8 +332,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let decision = hook::decide(&mut engine, key, edge);
     if was_enabled != engine.enabled() {
         crate::tray::reflect(engine.enabled());
-        let state = if engine.enabled() { "ON" } else { "OFF" };
-        eprintln!("patpans: snap tap {state}");
+        if let Some(control) = &control {
+            control.set_status(engine.enabled());
+        }
+        crate::log!("patpans: snap tap {}", state_label(engine.enabled()));
     }
     drop(engine);
     match decision {

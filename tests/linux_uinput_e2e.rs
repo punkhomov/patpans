@@ -47,17 +47,11 @@ fn default_engine() -> Engine {
     )
 }
 
-fn spawn_backend() {
-    let managed: Vec<patpans::Key> = ["A", "D", "W", "S", "F8"]
+fn managed_keys() -> Vec<patpans::Key> {
+    ["A", "D", "W", "S", "F8"]
         .iter()
         .map(|name| keys::by_name(name).unwrap())
-        .collect();
-    thread::spawn(move || {
-        let mut backend = LinuxBackend::new(&managed);
-        if let Err(err) = backend.run(default_engine()) {
-            eprintln!("patpans backend stopped: {err:#}");
-        }
-    });
+        .collect()
 }
 
 fn spawn_sink_reader(sink: Device) -> mpsc::Receiver<(u16, i32)> {
@@ -124,7 +118,7 @@ fn end_to_end_over_a_virtual_keyboard() {
         .build()
         .unwrap();
 
-    spawn_backend();
+    let (control, done) = spawn_controlled_backend(&managed_keys());
 
     let sink = wait_for_device(SINK_NAME, Duration::from_secs(15))
         .expect("the patpans virtual keyboard did not appear");
@@ -171,4 +165,103 @@ fn end_to_end_over_a_virtual_keyboard() {
         got, expected,
         "unexpected event stream from the virtual keyboard"
     );
+    stop_backend(&control, &done);
+}
+
+fn wait_for_device_gone(name: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let present = evdev::enumerate().any(|(_, device)| device.name() == Some(name));
+        if !present {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+fn control_channel() -> (
+    patpans::control::Control,
+    mpsc::Receiver<patpans::control::Command>,
+) {
+    let (tx, rx) = mpsc::channel();
+    (
+        patpans::control::Control::new(
+            tx,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ),
+        rx,
+    )
+}
+
+fn spawn_controlled_backend(
+    managed: &[patpans::Key],
+) -> (
+    patpans::control::Control,
+    mpsc::Receiver<Result<(), String>>,
+) {
+    let (control, commands) = control_channel();
+    let sender = control.clone();
+    let managed = managed.to_vec();
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut backend = LinuxBackend::new(&managed).with_control(control, commands);
+        let result = backend
+            .run(default_engine())
+            .map_err(|err| format!("{err:#}"));
+        let _ = done_tx.send(result);
+    });
+    (sender, done_rx)
+}
+
+fn stop_backend(control: &patpans::control::Control, done: &mpsc::Receiver<Result<(), String>>) {
+    assert!(control.send(patpans::control::Command::Stop));
+    let result = done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the backend must stop");
+    assert!(result.is_ok(), "backend stopped with an error: {result:?}");
+}
+
+#[test]
+fn stop_releases_the_keyboard_and_start_grabs_again() {
+    if VirtualDevice::builder().is_err() {
+        eprintln!("SKIP: /dev/uinput is not available in this environment");
+        return;
+    }
+
+    let mut source = VirtualDevice::builder()
+        .unwrap()
+        .name(SOURCE_NAME)
+        .with_keys(&keyset(&["A", "D", "W", "S", "F8", "Q"]))
+        .unwrap()
+        .build()
+        .unwrap();
+    let managed = managed_keys();
+
+    let (control, done) = spawn_controlled_backend(&managed);
+    assert!(
+        wait_for_device(SINK_NAME, Duration::from_secs(15)).is_some(),
+        "the patpans virtual keyboard did not appear"
+    );
+    stop_backend(&control, &done);
+    assert!(
+        wait_for_device_gone(SINK_NAME, Duration::from_secs(10)),
+        "the patpans virtual keyboard must disappear after stop"
+    );
+
+    let (control, done) = spawn_controlled_backend(&managed);
+    let sink = wait_for_device(SINK_NAME, Duration::from_secs(15))
+        .expect("the patpans virtual keyboard did not appear after restart");
+    let rx = spawn_sink_reader(sink);
+    feed(&mut source, &[("A", 1), ("A", 0)]);
+    let expected = vec![
+        (keys::by_name("A").unwrap().linux_code, 1),
+        (keys::by_name("A").unwrap().linux_code, 0),
+    ];
+    let got = collect(&rx, &expected, Duration::from_secs(10));
+    assert_eq!(
+        got, expected,
+        "the restarted backend must process input again"
+    );
+    stop_backend(&control, &done);
 }

@@ -1,16 +1,22 @@
 use std::collections::VecDeque;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 use crate::backend::Backend;
+use crate::control::{Command, Control};
 use crate::engine::{Edge, Engine, Event};
 use crate::keys;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SimBackend {
     input: VecDeque<Event>,
     trace: Vec<(Event, Vec<Event>)>,
     final_enabled: Option<bool>,
+    control: Option<Control>,
+    commands: Option<mpsc::Receiver<Command>>,
 }
 
 impl SimBackend {
@@ -29,7 +35,16 @@ impl SimBackend {
             input,
             trace: Vec::new(),
             final_enabled: None,
+            control: None,
+            commands: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_control(mut self, control: Control, commands: mpsc::Receiver<Command>) -> Self {
+        self.control = Some(control);
+        self.commands = Some(commands);
+        self
     }
 
     pub fn trace(&self) -> &[(Event, Vec<Event>)] {
@@ -62,9 +77,45 @@ fn parse_token(token: &str) -> Result<Event> {
 
 impl Backend for SimBackend {
     fn run(&mut self, mut engine: Engine) -> Result<()> {
-        while let Some(event) = self.input.pop_front() {
-            let out = engine.handle(event);
-            self.trace.push((event, out));
+        loop {
+            while let Some(event) = self.input.pop_front() {
+                let out = engine.handle(event);
+                self.trace.push((event, out));
+            }
+            let (Some(control), Some(commands)) = (self.control.as_ref(), self.commands.as_ref())
+            else {
+                break;
+            };
+            let mut stop = false;
+            while let Ok(command) = commands.try_recv() {
+                match command {
+                    Command::Toggle(reply) => {
+                        let target = !engine.enabled();
+                        engine.set_enabled(target);
+                        control.set_status(engine.enabled());
+                        let _ = reply.send(());
+                    }
+                    Command::SetEnabled(value, reply) => {
+                        engine.set_enabled(value);
+                        control.set_status(engine.enabled());
+                        let _ = reply.send(());
+                    }
+                    Command::Replace(config, reply) => {
+                        engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+                        control.set_status(engine.enabled());
+                        let _ = reply.send(());
+                    }
+                    Command::Capture(reply) => {
+                        let _ = reply.send(None);
+                    }
+                    Command::CaptureCancel => {}
+                    Command::Stop => stop = true,
+                }
+            }
+            if stop {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
         self.final_enabled = Some(engine.enabled());
         Ok(())
