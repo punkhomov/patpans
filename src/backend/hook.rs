@@ -137,6 +137,26 @@ mod tests {
             decide(&mut engine, key("A"), Edge::Release),
             Decision::Swallow
         );
+        assert_eq!(decide(&mut engine, key("D"), Edge::Release), Decision::Pass);
+    }
+
+    #[test]
+    fn only_the_override_produces_injections() {
+        let mut engine = engine();
+        let script = [
+            ("A", Edge::Press),
+            ("D", Edge::Press),
+            ("A", Edge::Release),
+            ("D", Edge::Release),
+        ];
+        let injected: usize = script
+            .iter()
+            .filter_map(|(name, edge)| match decide(&mut engine, key(name), *edge) {
+                Decision::Inject(events) => Some(events.len()),
+                Decision::Pass | Decision::Swallow => None,
+            })
+            .sum();
+        assert_eq!(injected, 2);
     }
 
     #[test]

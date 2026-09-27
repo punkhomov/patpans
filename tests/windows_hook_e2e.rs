@@ -60,6 +60,10 @@ unsafe extern "system" fn head_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 unsafe extern "system" fn tail_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         push(&TAIL, lparam, wparam);
+        let info = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+        if info.flags & LLKHF_INJECTED != 0 {
+            return 1;
+        }
     }
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
