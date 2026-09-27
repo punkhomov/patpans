@@ -13,7 +13,7 @@ use nix::poll::{PollFd, PollFlags, poll};
 
 use crate::backend::Backend;
 use crate::control::{Command, Control};
-use crate::engine::{Edge, Engine, Event};
+use crate::engine::{Edge, Engine, Event, Events};
 use crate::keys::{self, Key};
 
 pub struct LinuxBackend {
@@ -165,7 +165,7 @@ impl Runtime {
         }
     }
 
-    fn apply(&mut self, command: Command, control: Option<&Control>) -> Vec<Event> {
+    fn apply(&mut self, command: Command, control: Option<&Control>) -> Events {
         match command {
             Command::Toggle(reply) => {
                 let target = !self.engine.enabled();
@@ -190,31 +190,31 @@ impl Runtime {
                 reflect(&self.engine, control);
                 crate::log!("patpans: settings applied");
                 let _ = reply.send(());
-                Vec::new()
+                Events::new()
             }
             Command::Capture(reply) => {
                 self.capture = Some(reply);
-                Vec::new()
+                Events::new()
             }
             Command::CaptureCancel => {
                 self.capture = None;
-                Vec::new()
+                Events::new()
             }
             Command::Stop => {
                 self.shutdown = true;
-                Vec::new()
+                Events::new()
             }
         }
     }
 
-    fn on_input(&mut self, key: Key, value: i32, control: Option<&Control>) -> Vec<Event> {
+    fn on_input(&mut self, key: Key, value: i32, control: Option<&Control>) -> Events {
         if self.capture.is_some() {
             if value != 0
                 && let Some(reply) = self.capture.take()
             {
                 let _ = reply.send(Some(key));
             }
-            return Vec::new();
+            return Events::new();
         }
         let edge = if value == 0 {
             Edge::Release

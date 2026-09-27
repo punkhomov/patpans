@@ -1,7 +1,11 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+/// Bumped whenever the wire format changes in an incompatible way.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -15,8 +19,16 @@ pub enum Request {
     Stop,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub version: u32,
+    pub request: Request,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Response {
+    #[serde(default)]
+    pub version: u32,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -29,6 +41,7 @@ pub struct Response {
 impl Response {
     pub fn ok() -> Self {
         Self {
+            version: PROTOCOL_VERSION,
             ok: true,
             ..Self::default()
         }
@@ -36,6 +49,7 @@ impl Response {
 
     pub fn error(message: impl Into<String>) -> Self {
         Self {
+            version: PROTOCOL_VERSION,
             ok: false,
             error: Some(message.into()),
             ..Self::default()
@@ -44,6 +58,7 @@ impl Response {
 
     pub fn with_status(status: StatusInfo) -> Self {
         Self {
+            version: PROTOCOL_VERSION,
             ok: true,
             status: Some(status),
             ..Self::default()
@@ -52,6 +67,7 @@ impl Response {
 
     pub fn with_key(key: Option<String>) -> Self {
         Self {
+            version: PROTOCOL_VERSION,
             ok: true,
             key,
             ..Self::default()
@@ -72,7 +88,7 @@ pub struct StatusInfo {
     pub config_path: String,
 }
 
-pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>> {
+pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Envelope>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);
@@ -90,21 +106,37 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> Result<()
     Ok(())
 }
 
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Client {
     reader: BufReader<transport::Stream>,
 }
 
 impl Client {
     pub fn connect(endpoint: Option<&str>) -> Result<Self> {
-        let stream = transport::connect(endpoint)
+        Self::connect_with_timeout(endpoint, CLIENT_TIMEOUT)
+    }
+
+    /// Connects and arms best-effort I/O timeouts. Transports without timeout
+    /// support (Windows named pipes) ignore the request.
+    pub fn connect_with_timeout(endpoint: Option<&str>, timeout: Duration) -> Result<Self> {
+        let mut stream = transport::connect(endpoint)
             .context("failed to connect to the patpans daemon (is it running?)")?;
+        arm_timeout(stream.set_read_timeout(Some(timeout)))
+            .context("failed to arm the IPC read timeout")?;
+        arm_timeout(stream.set_write_timeout(Some(timeout)))
+            .context("failed to arm the IPC write timeout")?;
         Ok(Self {
             reader: BufReader::new(stream),
         })
     }
 
     pub fn request(&mut self, request: &Request) -> Result<Response> {
-        let mut line = serde_json::to_string(request)?;
+        let envelope = Envelope {
+            version: PROTOCOL_VERSION,
+            request: request.clone(),
+        };
+        let mut line = serde_json::to_string(&envelope)?;
         line.push('\n');
         self.reader.get_mut().write_all(line.as_bytes())?;
         self.reader.get_mut().flush()?;
@@ -112,7 +144,23 @@ impl Client {
         if self.reader.read_line(&mut response)? == 0 {
             bail!("the patpans daemon closed the connection");
         }
-        serde_json::from_str(&response).context("invalid response from the daemon")
+        let response: Response =
+            serde_json::from_str(&response).context("invalid response from the daemon")?;
+        if response.version != PROTOCOL_VERSION {
+            bail!(
+                "protocol version mismatch: the daemon speaks v{} and this client speaks v{PROTOCOL_VERSION}",
+                response.version
+            );
+        }
+        Ok(response)
+    }
+}
+
+fn arm_timeout(result: io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -123,6 +171,7 @@ pub mod transport {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use nix::unistd::Uid;
 
@@ -193,6 +242,11 @@ pub mod transport {
         pub fn accept(&self) -> io::Result<Stream> {
             self.listener.accept().map(|(stream, _)| Stream(stream))
         }
+
+        /// Connects to this listener to unblock a pending `accept`.
+        pub fn wake(&self) -> io::Result<()> {
+            UnixStream::connect(&self.path).map(drop)
+        }
     }
 
     impl Drop for Listener {
@@ -203,6 +257,16 @@ pub mod transport {
 
     pub fn connect(explicit: Option<&str>) -> io::Result<Stream> {
         UnixStream::connect(resolve(explicit).0).map(Stream)
+    }
+
+    impl Stream {
+        pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+            self.0.set_read_timeout(timeout)
+        }
+
+        pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+            self.0.set_write_timeout(timeout)
+        }
     }
 
     impl Read for Stream {
@@ -225,6 +289,7 @@ pub mod transport {
 #[cfg(windows)]
 pub mod transport {
     use std::io::{self, Read, Write};
+    use std::time::Duration;
 
     use interprocess::local_socket::{
         GenericNamespaced, ListenerOptions, Stream as IpcStream, prelude::*,
@@ -237,22 +302,34 @@ pub mod transport {
         )
     }
 
-    pub struct Listener(interprocess::local_socket::Listener);
+    pub struct Listener {
+        listener: interprocess::local_socket::Listener,
+        name: String,
+    }
 
+    /// Named pipes do not support I/O timeouts, and interprocess's nonblocking
+    /// mode reports "no data yet" as EOF, so this stream stays blocking.
+    /// Connection lifetime is bounded by the daemon's client limit and by
+    /// clients closing after each request.
     pub struct Stream(IpcStream);
 
     pub fn listen(explicit: Option<&str>) -> io::Result<Listener> {
         let name = endpoint(explicit);
-        let name = name.as_str().to_ns_name::<GenericNamespaced>()?;
-        ListenerOptions::new()
-            .name(name)
-            .create_sync()
-            .map(Listener)
+        let listener = ListenerOptions::new()
+            .name(name.as_str().to_ns_name::<GenericNamespaced>()?)
+            .create_sync()?;
+        Ok(Listener { listener, name })
     }
 
     impl Listener {
         pub fn accept(&self) -> io::Result<Stream> {
-            self.0.accept().map(Stream)
+            self.listener.accept().map(Stream)
+        }
+
+        /// Connects to this listener to unblock a pending `accept`.
+        pub fn wake(&self) -> io::Result<()> {
+            let name = self.name.as_str().to_ns_name::<GenericNamespaced>()?;
+            IpcStream::connect(name).map(drop)
         }
     }
 
@@ -260,6 +337,22 @@ pub mod transport {
         let name = endpoint(explicit);
         let name = name.as_str().to_ns_name::<GenericNamespaced>()?;
         IpcStream::connect(name).map(Stream)
+    }
+
+    impl Stream {
+        pub fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "named pipes do not support I/O timeouts",
+            ))
+        }
+
+        pub fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "named pipes do not support I/O timeouts",
+            ))
+        }
     }
 
     impl Read for Stream {
@@ -282,6 +375,7 @@ pub mod transport {
 #[cfg(not(any(target_os = "linux", windows)))]
 pub mod transport {
     use std::io::{self, Read, Write};
+    use std::time::Duration;
 
     fn unsupported() -> io::Error {
         io::Error::new(
@@ -304,6 +398,20 @@ pub mod transport {
 
     impl Listener {
         pub fn accept(&self) -> io::Result<Stream> {
+            Err(unsupported())
+        }
+
+        pub fn wake(&self) -> io::Result<()> {
+            Err(unsupported())
+        }
+    }
+
+    impl Stream {
+        pub fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(unsupported())
+        }
+
+        pub fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
             Err(unsupported())
         }
     }

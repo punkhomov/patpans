@@ -80,7 +80,7 @@ impl Backend for SimBackend {
         loop {
             while let Some(event) = self.input.pop_front() {
                 let out = engine.handle(event);
-                self.trace.push((event, out));
+                self.trace.push((event, out.into_vec()));
             }
             let (Some(control), Some(commands)) = (self.control.as_ref(), self.commands.as_ref())
             else {

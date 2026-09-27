@@ -8,9 +8,9 @@
 | --- | --- | --- |
 | Юнит-тесты (27; с feature `gui` — 30) | таблица клавиш и алиасы, парсинг/валидация конфига (включая запрет общих клавиш между группами), парсер скриптов, toggle, правила хука (кроссплатформенные), портативные пути, модель настроек GUI, ресинк удерживаемых клавиш, стресс-тест на 80k событий | `cargo test [--features gui]` |
 | Интеграционные (10) | сценарии SOCD на симуляторе: перекрытие, sticky, тапы, независимость групп, автоповтор, toggle, ресинк при включении, non-sticky | `cargo test` |
-| Демон и IPC (2) | headless-демон с sim-бэкендом: status/toggle/enable/reload/capture/stop, single-instance | `cargo test --test daemon_ipc` |
+| Демон и IPC (3) | headless-демон с sim-бэкендом: status/toggle/enable/reload/capture/stop, single-instance, несовпадение версии протокола | `cargo test --test daemon_ipc` |
 | Linux E2E (2, QEMU) | настоящие `uinput`-клавиатуры, `grab` через evdev, полный production-путь `LinuxBackend`, цикл Stop/Start | `./scripts/e2e-qemu.sh` |
-| Windows E2E (1, feature `testing`) | низкоуровневый хук на живом Windows: перекрытие, toggle, отсутствие эхо-цикла | `cargo test --features testing --test windows_hook_e2e` |
+| Windows E2E (1, feature `testing`) | низкоуровневый хук на живом Windows: перекрытие, toggle, отсутствие эхо-цикла | `cargo test --features testing --test windows_hook_e2e`; в CI шаг advisory (`continue-on-error`), потому что раннер может не иметь интерактивного десктопа |
 | GUI | модель настроек юнит-тестами; компиляция с feature `gui` под Linux и Windows; само окно в CI не запускается (нужен дисплей) | `cargo clippy --all-targets --features gui -- -D warnings` |
 | Сборка и линты | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build --release` | — |
 | Кросс-сборка | компиляция Windows-бэкенда | `cargo check --target x86_64-pc-windows-gnu` |
@@ -18,10 +18,11 @@
 
 ## Демон и IPC
 
-- Транспорт: Unix-сокет (`$XDG_RUNTIME_DIR/patpans.sock`, права 0600; fallback `/tmp/patpans-<uid>.sock`) на Linux, именованный пайп `patpans` на Windows; эндпоинт переопределяется `PAT_PANS_SOCKET` / `PAT_PANS_PIPE`.
-- Протокол: JSON-lines, команды `ping/status/toggle/set_enabled/reload/capture_key/stop`.
-- `tests/daemon_ipc.rs` поднимает демон с `SimBackend` (без железа) и проверяет полный цикл по сокету, включая `reload` из файла, capture (в sim возвращает `null`) и отказ второго демона на том же эндпоинте.
-- Файловый лог (`patpans.log` рядом с конфигом) инициализируется в `run`; в тестах не проверяется.
+- Транспорт: Unix-сокет (`$XDG_RUNTIME_DIR/patpans.sock`, затем `/run/user/<uid>/patpans.sock`, иначе приватная директория `0700` в temp; права 0600) на Linux, именованный пайп `patpans` на Windows; эндпоинт переопределяется `--socket`, `PAT_PANS_SOCKET` / `PAT_PANS_PIPE`.
+- Протокол: JSON-lines; каждый запрос и ответ несёт `version` (`PROTOCOL_VERSION`), при несовпадении демон отвечает ошибкой, клиент её показывает. Команды `ping/status/toggle/set_enabled/reload/capture_key/stop`.
+- Соединения ограничены (`MAX_CLIENTS`), на Linux дополнительно read/write-таймауты. У именованных пайпов Windows таймаутов нет (nonblocking-режим interprocess отдаёт EOF вместо «нет данных»), поэтому там соединения ограничены лимитом и закрываются клиентом после каждого запроса.
+- `tests/daemon_ipc.rs` поднимает демон с `SimBackend` (без железа) и проверяет полный цикл по сокету, включая `reload` из файла, capture (в sim возвращает `null`), отказ второго демона на том же эндпоинте и ошибку версии протокола.
+- Файловый лог (`patpans.log` рядом с конфигом) инициализируется в `run` и ротируется в `patpans.log.old` при 1 МиБ; в тестах не проверяется.
 - Не покрыто: named pipe в рантайме (только компиляция под Windows), права сокета при sudo-демоне, silent-запуск без консоли (появится вместе с GUI).
 
 ## E2E через QEMU

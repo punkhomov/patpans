@@ -109,6 +109,36 @@ key_table!(
     ("RightMeta", 126, 0x5C),
 );
 
+/// Compile-time lookup for the built-in defaults.
+///
+/// # Panics
+///
+/// Panics at compile time when the key is not part of [`KEYS`], which would be
+/// a programming error in the built-in configuration.
+pub const fn default_key(name: &str) -> Key {
+    let wanted = name.as_bytes();
+    let mut index = 0;
+    while index < KEYS.len() {
+        let candidate = KEYS[index].name.as_bytes();
+        if candidate.len() == wanted.len() {
+            let mut offset = 0;
+            let mut equal = true;
+            while offset < wanted.len() {
+                if candidate[offset] != wanted[offset] {
+                    equal = false;
+                    break;
+                }
+                offset += 1;
+            }
+            if equal {
+                return KEYS[index];
+            }
+        }
+        index += 1;
+    }
+    panic!("unknown key in the built-in key table");
+}
+
 fn alias(name: &str) -> Option<&'static str> {
     let canonical = match name.to_ascii_lowercase().as_str() {
         "esc" => "Escape",
