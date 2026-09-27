@@ -23,7 +23,7 @@ impl LinuxBackend {
 
 impl Backend for LinuxBackend {
     fn run(&mut self, mut engine: Engine) -> Result<()> {
-        let (tx, rx) = mpsc::channel::<(u16, i32)>();
+        let (tx, rx) = mpsc::sync_channel::<(u16, i32)>(1024);
         let mut capabilities = AttributeSet::<KeyCode>::new();
         let mut devices = 0_u32;
 

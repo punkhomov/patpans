@@ -276,4 +276,23 @@ mod tests {
         assert!(!engine.enabled());
         assert_eq!(engine.set_enabled(false), Vec::<Event>::new());
     }
+
+    #[test]
+    fn sustained_events_keep_state_bounded() {
+        let mut engine = Engine::new(vec![Group::new(key("A"), key("D"))], None, true);
+        let mut produced = 0;
+        for _ in 0..20_000 {
+            for (name, edge) in [
+                ("A", Edge::Press),
+                ("D", Edge::Press),
+                ("D", Edge::Release),
+                ("A", Edge::Release),
+            ] {
+                let out = engine.handle(Event::new(key(name), edge));
+                assert!(out.len() <= 2, "per-event output must stay bounded");
+                produced += out.len();
+            }
+        }
+        assert_eq!(produced, 120_000);
+    }
 }
