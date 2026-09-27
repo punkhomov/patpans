@@ -2,19 +2,26 @@
 name = "patpans"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 description = "Software Snap Tap / SOCD cleaner: the last pressed key wins for opposing movement keys"
 license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
+eframe = { version = "0.36", optional = true, default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.6"
 
 [features]
 testing = []
+gui = ["dep:eframe"]
+
+[[bin]]
+name = "patpans-gui"
+path = "src/bin/patpans-gui.rs"
+required-features = ["gui"]
 
 [lints.rust]
 unsafe_code = "warn"
@@ -35,4 +42,4 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
 [target."cfg(windows)".dependencies]
 interprocess = "2.4.4"
 tray-icon = "0.25"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Threading", "Win32_Security", "Win32_UI_Shell"] }

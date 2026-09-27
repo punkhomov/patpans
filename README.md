@@ -40,6 +40,19 @@ cargo run -- check
 
 Конфиг по умолчанию — `patpans.toml` рядом с исполняемым файлом (создаётся при первом `run`); лог пишется в `patpans.log` там же. Путь можно переопределить флагом `--config <PATH>` или переменной `PAT_PANS_SOCKET`/`PAT_PANS_PIPE` для IPC-эндпоинта.
 
+## GUI
+
+```console
+cargo build --release --features gui   # соберёт patpans-gui и patpans
+```
+
+`patpans-gui` — простое окно настроек: статус демона (ON/OFF, elevated), Start/Stop, хоткей (список + «Capture»), sticky, редактор групп, трей, Save/Reload. Особенности:
+
+- трей принадлежит демону, GUI его не создаёт; закрытие окна не останавливает перехват;
+- запуск демона из GUI идёт без окна консоли (Windows), лог — в `patpans.log` рядом с конфигом;
+- GUI ищет `patpans`/`patpans.exe` рядом с собой, поэтому в portable-сборке держите оба файла вместе;
+- «Start as administrator» (Windows) перезапускает демон через UAC — нужно для игр под elevation.
+
 ## Конфиг (`patpans.toml`)
 
 ```toml
@@ -67,7 +80,7 @@ min-publish-age = "14 days"
 
 ## Тестирование
 
-Логика покрыта 37 тестами: юнит-тесты (включая кроссплатформенные правила хука и портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
+Логика покрыта 40 тестами (включая модель настроек GUI): юнит-тесты (правила хука, портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
 
 Подробный отчёт: что именно проверено, как воспроизвести, что не покрыто — в [TESTING.md](TESTING.md).
 

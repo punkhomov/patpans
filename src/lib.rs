@@ -9,6 +9,8 @@ pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod engine;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod ipc;
 pub mod keys;
 pub mod logging;

@@ -6,11 +6,12 @@
 
 | Уровень | Что проверяет | Команда |
 | --- | --- | --- |
-| Юнит-тесты (23) | таблица клавиш и алиасы, парсинг/валидация конфига, парсер скриптов, toggle, правила хука (кроссплатформенные), портативные пути, стресс-тест на 80k событий | `cargo test` |
+| Юнит-тесты (23; с feature `gui` — 26) | таблица клавиш и алиасы, парсинг/валидация конфига, парсер скриптов, toggle, правила хука (кроссплатформенные), портативные пути, модель настроек GUI, стресс-тест на 80k событий | `cargo test [--features gui]` |
 | Интеграционные (10) | сценарии SOCD на симуляторе: перекрытие, sticky, тапы, независимость групп, автоповтор, toggle, ресинк при включении, non-sticky | `cargo test` |
 | Демон и IPC (2) | headless-демон с sim-бэкендом: status/toggle/enable/reload/capture/stop, single-instance | `cargo test --test daemon_ipc` |
 | Linux E2E (2, QEMU) | настоящие `uinput`-клавиатуры, `grab` через evdev, полный production-путь `LinuxBackend`, цикл Stop/Start | `./scripts/e2e-qemu.sh` |
 | Windows E2E (1, feature `testing`) | низкоуровневый хук на живом Windows: перекрытие, toggle, отсутствие эхо-цикла | `cargo test --features testing --test windows_hook_e2e` |
+| GUI | модель настроек юнит-тестами; компиляция с feature `gui` под Linux и Windows; само окно в CI не запускается (нужен дисплей) | `cargo clippy --all-targets --features gui -- -D warnings` |
 | Сборка и линты | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo build --release` | — |
 | Кросс-сборка | компиляция Windows-бэкенда | `cargo check --target x86_64-pc-windows-gnu` |
 | min-publish-age | фильтрация свежих версий зависимостей | см. раздел ниже |
@@ -108,6 +109,7 @@ Rust nightly и MSVC-toolchain (VS Build Tools). Администратор не
 9. **Объём продукта.** Нет GUI/трея в привычном смысле (только иконка с меню), нет профилей и групп более двух клавиш; конфиг только TOML.
 10. **`simulate` не заменяет e2e.** Он проверяет логику движка, но не syscall'ы и хуки; их проверяют только QEMU- и Windows-e2e.
 11. **Трей не покрыт автотестами.** E2e создают бэкенды без трея, поэтому иконка, галочка и пункты меню проверяются вручную. На Linux трей работает через D-Bus (`ksni`), в QEMU сессионного D-Bus нет — `run` там выведет `tray unavailable` и продолжит без иконки.
+12. **GUI вручную.** Окно не покрыто автотестами (нужен дисплей). Чек-лист: статус появляется при запущенном демоне; Start/Stop и Toggle работают; «Capture» ловит нажатие; правки групп/sticky сохраняются в `patpans.toml` и применяются через Reload; «Start as administrator» (Windows) поднимает UAC; закрытие окна не останавливает перехват.
 
 ## Как перезапустить всё
 
