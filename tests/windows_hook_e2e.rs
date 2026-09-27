@@ -220,10 +220,18 @@ fn end_to_end_through_the_keyboard_hook() {
         .iter()
         .filter(|record| is_key(record.message) && record.injected && record.tag != TEST_TAG)
         .count();
+    let expected_injections = expected
+        .iter()
+        .filter(|record| record.tag != TEST_TAG)
+        .count();
     assert_eq!(
         tagged,
         script.len(),
         "the head hook did not see all synthetic inputs"
+    );
+    assert_eq!(
+        injected_by_patpans, expected_injections,
+        "unexpected number of patpans injections, possible echo loop"
     );
     assert_eq!(
         injected_by_patpans, 3,
