@@ -53,6 +53,15 @@ cargo build --release --features gui   # соберёт patpans-gui и patpans
 - GUI ищет `patpans`/`patpans.exe` рядом с собой, поэтому в portable-сборке держите оба файла вместе;
 - «Start as administrator» (Windows) перезапускает демон через UAC — нужно для игр под elevation.
 
+## Релизы
+
+GitHub Actions (`.github/workflows/ci.yml`) на каждый push в `main` собирает portable-артефакты:
+
+- `patpans-portable-windows-x86_64.zip` — `patpans.exe`, `patpans-gui.exe`, пример конфига, README;
+- `patpans-portable-linux-x86_64.tar.gz` — `patpans`, `patpans-gui`, пример конфига, README.
+
+Там же гоняются линты, тесты и QEMU-e2e (Linux), а на Windows — хук-тест и сборка GUI.
+
 ## Конфиг (`patpans.toml`)
 
 ```toml

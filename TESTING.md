@@ -116,7 +116,8 @@ Rust nightly и MSVC-toolchain (VS Build Tools). Администратор не
 ```console
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --features gui -- -D warnings
+cargo test --features gui
 cargo check --target x86_64-pc-windows-gnu
 cargo clippy --target x86_64-pc-windows-gnu --tests --features testing -- -D warnings
 ./scripts/e2e-qemu.sh

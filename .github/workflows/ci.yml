@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (gui)
+        run: cargo clippy --all-targets --features gui -- -D warnings
+      - name: Tests
+        run: cargo test --features gui
+      - name: Install QEMU e2e dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 linux-image-generic busybox-static cpio zstd
+      - name: QEMU e2e
+        run: ./scripts/e2e-qemu.sh
+      - name: Release build
+        run: cargo build --release --features gui
+      - name: Package the portable tarball
+        run: |
+          mkdir -p dist
+          cp target/release/patpans target/release/patpans-gui patpans.toml README.md dist/
+          tar -C dist -czf patpans-portable-linux-x86_64.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patpans-portable-linux-x86_64
+          path: patpans-portable-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show
+      - name: Clippy
+        run: cargo clippy --all-targets --features gui -- -D warnings
+      - name: Windows hook e2e
+        run: cargo test --features testing --test windows_hook_e2e -- --nocapture --test-threads=1
+      - name: Release build
+        run: cargo build --release --features gui
+      - name: Package the portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/patpans.exe dist/
+          Copy-Item target/release/patpans-gui.exe dist/
+          Copy-Item patpans.toml dist/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath patpans-portable-windows-x86_64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patpans-portable-windows-x86_64
+          path: patpans-portable-windows-x86_64.zip
