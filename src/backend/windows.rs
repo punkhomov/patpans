@@ -131,6 +131,7 @@ impl Backend for WindowsBackend {
         }
         drop(hook);
         HOOK_THREAD.store(0, Ordering::SeqCst);
+        eprintln!("patpans: keyboard hook removed, exiting");
         Ok(())
     }
 }
