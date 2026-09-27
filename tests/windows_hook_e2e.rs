@@ -233,8 +233,4 @@ fn end_to_end_through_the_keyboard_hook() {
         injected_by_patpans, expected_injections,
         "unexpected number of patpans injections, possible echo loop"
     );
-    assert_eq!(
-        injected_by_patpans, 3,
-        "unexpected number of patpans injections, possible echo loop"
-    );
 }
