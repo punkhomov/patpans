@@ -1,0 +1,33 @@
+[package]
+name = "patpans"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Software Snap Tap / SOCD cleaner: the last pressed key wins for opposing movement keys"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
+[features]
+testing = []
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[profile.release]
+lto = true
+strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13.2"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }

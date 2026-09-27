@@ -1,0 +1,7 @@
+toggle = "F8"
+sticky = true
+
+groups = [
+  ["A", "D"],
+  ["W", "S"],
+]

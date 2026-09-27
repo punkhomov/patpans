@@ -1,0 +1,8 @@
+# `min-publish-age` was stabilized in Cargo 1.100: the `[unstable]` flag
+# `min-publish-age = true` no longer exists, these keys are always available.
+# The toolchain is still nightly (see rust-toolchain.toml).
+[registry]
+global-min-publish-age = "14 days"
+
+[registries.crates-io]
+min-publish-age = "14 days"
