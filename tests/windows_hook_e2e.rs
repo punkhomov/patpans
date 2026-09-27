@@ -192,6 +192,7 @@ fn end_to_end_through_the_keyboard_hook() {
         rec(WM_KEYDOWN, "D", 0),
         rec(WM_KEYUP, "D", 0),
         rec(WM_KEYDOWN, "A", 0),
+        rec(WM_KEYUP, "A", TEST_TAG),
         rec(WM_KEYDOWN, "Q", TEST_TAG),
         rec(WM_KEYUP, "Q", TEST_TAG),
         rec(WM_KEYDOWN, "W", TEST_TAG),
