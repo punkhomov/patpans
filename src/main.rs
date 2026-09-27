@@ -45,6 +45,9 @@ struct RunArgs {
     /// Disable the sticky-keys restore behavior
     #[arg(long)]
     no_sticky: bool,
+    /// Do not show the system tray icon
+    #[arg(long)]
+    no_tray: bool,
 }
 
 #[derive(Args)]
@@ -120,7 +123,8 @@ fn cmd_run(path: &Path, args: &RunArgs) -> Result<()> {
     )?;
     let keys = managed_keys(&config);
     let engine = Engine::new(config.groups, config.toggle, config.sticky);
-    let mut backend = backend::default_backend(&keys)?;
+    let tray = config.tray && !args.no_tray;
+    let mut backend = backend::default_backend(&keys, tray)?;
     backend.run(engine)
 }
 

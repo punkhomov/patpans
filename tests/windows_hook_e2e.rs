@@ -38,15 +38,15 @@ static TAIL: OnceLock<Mutex<Vec<Record>>> = OnceLock::new();
 
 fn push(slot: &OnceLock<Mutex<Vec<Record>>>, lparam: LPARAM, wparam: WPARAM) {
     let info = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-    if let Some(records) = slot.get() {
-        if let Ok(mut records) = records.lock() {
-            records.push(Record {
-                message: u32::try_from(wparam).unwrap_or_default(),
-                vk: info.vkCode,
-                injected: info.flags & LLKHF_INJECTED != 0,
-                tag: info.dwExtraInfo,
-            });
-        }
+    if let Some(records) = slot.get()
+        && let Ok(mut records) = records.lock()
+    {
+        records.push(Record {
+            message: u32::try_from(wparam).unwrap_or_default(),
+            vk: info.vkCode,
+            injected: info.flags & LLKHF_INJECTED != 0,
+            tag: info.dwExtraInfo,
+        });
     }
 }
 

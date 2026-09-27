@@ -8,6 +8,7 @@ pub mod backend;
 pub mod config;
 pub mod engine;
 pub mod keys;
+mod tray;
 
 pub use config::Config;
 pub use engine::{Edge, Engine, Event, Group};

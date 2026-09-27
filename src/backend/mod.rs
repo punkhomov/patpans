@@ -17,14 +17,14 @@ pub trait Backend {
 }
 
 #[allow(unused_variables)]
-pub fn default_backend(managed: &[Key]) -> Result<Box<dyn Backend>> {
+pub fn default_backend(managed: &[Key], tray: bool) -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(linux::LinuxBackend::new(managed)))
+        Ok(Box::new(linux::LinuxBackend::new(managed).with_tray(tray)))
     }
     #[cfg(windows)]
     {
-        Ok(Box::new(windows::WindowsBackend::new()))
+        Ok(Box::new(windows::WindowsBackend::new().with_tray(tray)))
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {

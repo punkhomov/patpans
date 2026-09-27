@@ -1,5 +1,6 @@
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use evdev::uinput::VirtualDevice;
@@ -11,22 +12,29 @@ use crate::keys::{self, Key};
 
 pub struct LinuxBackend {
     managed: Vec<Key>,
+    tray: bool,
 }
 
 impl LinuxBackend {
     pub fn new(managed: &[Key]) -> Self {
         Self {
             managed: managed.to_vec(),
+            tray: false,
         }
     }
-}
 
-impl Backend for LinuxBackend {
-    fn run(&mut self, mut engine: Engine) -> Result<()> {
-        let (tx, rx) = mpsc::sync_channel::<(u16, i32)>(1024);
-        let mut capabilities = AttributeSet::<KeyCode>::new();
+    #[must_use]
+    pub const fn with_tray(mut self, tray: bool) -> Self {
+        self.tray = tray;
+        self
+    }
+
+    fn grab_keyboards(
+        &self,
+        tx: &mpsc::SyncSender<(u16, i32)>,
+        capabilities: &mut AttributeSet<KeyCode>,
+    ) -> Result<u32> {
         let mut devices = 0_u32;
-
         for (path, mut device) in evdev::enumerate() {
             if device.name().is_some_and(|name| name.contains("patpans")) {
                 continue;
@@ -71,6 +79,15 @@ impl Backend for LinuxBackend {
             });
             devices += 1;
         }
+        Ok(devices)
+    }
+}
+
+impl Backend for LinuxBackend {
+    fn run(&mut self, mut engine: Engine) -> Result<()> {
+        let (tx, rx) = mpsc::sync_channel::<(u16, i32)>(1024);
+        let mut capabilities = AttributeSet::<KeyCode>::new();
+        let devices = self.grab_keyboards(&tx, &mut capabilities)?;
         drop(tx);
 
         if devices == 0 {
@@ -91,41 +108,80 @@ impl Backend for LinuxBackend {
             .build()
             .context("failed to create the virtual keyboard")?;
 
+        if self.tray
+            && let Err(err) = crate::tray::start(engine.enabled())
+        {
+            eprintln!("patpans: tray unavailable: {err:#}");
+        }
+
         let toggle = engine
             .toggle()
             .map_or_else(|| "none".to_string(), |key| key.to_string());
-        let state = if engine.enabled() { "ON" } else { "OFF" };
-        eprintln!("patpans: snap tap {state} — {devices} device(s) grabbed, toggle: {toggle}");
+        eprintln!(
+            "patpans: snap tap {} — {devices} device(s) grabbed, toggle: {toggle}",
+            state_label(engine.enabled())
+        );
 
-        while let Ok((code, value)) = rx.recv() {
-            let key = keys::by_linux_code(code).unwrap_or_else(|| keys::unknown_linux(code));
-            let edge = if value == 0 {
-                Edge::Release
-            } else {
-                Edge::Press
-            };
-            let was_enabled = engine.enabled();
-            let out = engine.handle(Event::new(key, edge));
-            if was_enabled != engine.enabled() {
-                let state = if engine.enabled() { "ON" } else { "OFF" };
-                eprintln!("patpans: snap tap {state}");
+        loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok((code, value)) => {
+                    let key =
+                        keys::by_linux_code(code).unwrap_or_else(|| keys::unknown_linux(code));
+                    let edge = if value == 0 {
+                        Edge::Release
+                    } else {
+                        Edge::Press
+                    };
+                    let was_enabled = engine.enabled();
+                    let out = engine.handle(Event::new(key, edge));
+                    if was_enabled != engine.enabled() {
+                        crate::tray::reflect(engine.enabled());
+                        eprintln!("patpans: snap tap {}", state_label(engine.enabled()));
+                    }
+                    emit(&mut virtual_device, &out);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            let mut inputs = Vec::with_capacity(out.len());
-            for event in out {
-                let value = i32::from(event.edge == Edge::Press);
-                inputs.push(InputEvent::new(
-                    EventType::KEY.0,
-                    event.key.linux_code,
-                    value,
-                ));
-            }
-            if !inputs.is_empty() {
-                if let Err(err) = virtual_device.emit(&inputs) {
-                    eprintln!("patpans: failed to emit {} event(s): {err}", inputs.len());
+            while let Some(command) = crate::tray::poll_menu_command() {
+                match command.as_str() {
+                    "toggle" => {
+                        let target = !engine.enabled();
+                        let out = engine.set_enabled(target);
+                        crate::tray::reflect(engine.enabled());
+                        eprintln!("patpans: snap tap {}", state_label(engine.enabled()));
+                        emit(&mut virtual_device, &out);
+                    }
+                    "quit" => {
+                        crate::tray::shutdown();
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
         }
 
+        crate::tray::shutdown();
         Ok(())
+    }
+}
+
+const fn state_label(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
+}
+
+fn emit(virtual_device: &mut VirtualDevice, events: &[Event]) {
+    if events.is_empty() {
+        return;
+    }
+    let inputs: Vec<InputEvent> = events
+        .iter()
+        .map(|event| {
+            let value = i32::from(event.edge == Edge::Press);
+            InputEvent::new(EventType::KEY.0, event.key.linux_code, value)
+        })
+        .collect();
+    if let Err(err) = virtual_device.emit(&inputs) {
+        eprintln!("patpans: failed to emit {} event(s): {err}", inputs.len());
     }
 }

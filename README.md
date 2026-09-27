@@ -11,12 +11,13 @@
 - Клавиши вне групп проходят без изменений, автоповтор пробрасывается только для активной клавиши.
 - Хоткей вкл/выкл (по умолчанию `F8`) с корректным ресинком состояния при переключении.
 - Бэкенды: Linux (`evdev` + `uinput`), Windows (низкоуровневый хук `WH_KEYBOARD_LL` + `SendInput`, без драйверов).
+- Системный трей (`tray-icon`): иконка on/off, галочка «Snap Tap enabled» и «Quit patpans» в меню; состояние синхронизировано с хоткеем `F8`. Отключается флагом `--no-tray` или `tray = false`.
 - Режим `simulate` — прогон сценария без железа; `check` — валидация конфига и диагностика окружения.
 
 ## Требования
 
-- Rust nightly — `rust-toolchain.toml` фиксирует канал.
-- Linux: доступ к `/dev/input/*` и `/dev/uinput` (root или группа `input` + udev-правило), ядро с `uinput`.
+- Rust nightly — `rust-toolchain.toml` фиксирует канал (MSRV 1.90 из-за `tray-icon` 0.25).
+- Linux: доступ к `/dev/input/*` и `/dev/uinput` (root или группа `input` + udev-правило), ядро с `uinput`. Трей работает через D-Bus (`ksni`-бэкенд, GTK не нужен); без сессионного D-Bus `run` предупредит и продолжит без иконки.
 - Windows: дополнительных драйверов не нужно; если игра запущена от администратора, patpans тоже нужно запускать от администратора.
 
 ## Сборка и запуск
@@ -35,10 +36,11 @@ cargo run -- check
 ```toml
 toggle = "F8"      # клавиша вкл/выкл, "none" — без хоткея
 sticky = true      # возвращать удержанную клавишу после отпускания перекрывшей
+tray = true        # иконка в системном трее
 groups = [["A", "D"], ["W", "S"]]
 ```
 
-Флаги CLI: `--config <PATH>`, `run --toggle <KEY> --groups "A,D;W,S" --no-sticky`, `simulate --script <SCRIPT> --builtin <NAME>`. Имена клавиш — как в таблице `src/keys.rs` (`A`..`Z`, `Left`, `Space`, `F8`, ...), есть алиасы (`ctrl`, `esc`, `arrowleft`).
+Флаги CLI: `--config <PATH>`, `run --toggle <KEY> --groups "A,D;W,S" --no-sticky --no-tray`, `simulate --script <SCRIPT> --builtin <NAME>`. Имена клавиш — как в таблице `src/keys.rs` (`A`..`Z`, `Left`, `Space`, `F8`, ...), есть алиасы (`ctrl`, `esc`, `arrowleft`).
 
 ## min-publish-age
 

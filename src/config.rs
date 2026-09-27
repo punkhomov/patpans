@@ -15,6 +15,8 @@ pub struct FileConfig {
     pub toggle: String,
     #[serde(default = "default_sticky")]
     pub sticky: bool,
+    #[serde(default = "default_tray")]
+    pub tray: bool,
     #[serde(default = "default_groups")]
     pub groups: Vec<Vec<String>>,
 }
@@ -24,6 +26,10 @@ fn default_toggle() -> String {
 }
 
 const fn default_sticky() -> bool {
+    true
+}
+
+const fn default_tray() -> bool {
     true
 }
 
@@ -39,6 +45,7 @@ impl Default for FileConfig {
         Self {
             toggle: default_toggle(),
             sticky: default_sticky(),
+            tray: default_tray(),
             groups: default_groups(),
         }
     }
@@ -48,6 +55,7 @@ impl Default for FileConfig {
 pub struct Config {
     pub toggle: Option<Key>,
     pub sticky: bool,
+    pub tray: bool,
     pub groups: Vec<Group>,
 }
 
@@ -86,6 +94,7 @@ impl FileConfig {
         Ok(Config {
             toggle,
             sticky: self.sticky,
+            tray: self.tray,
             groups,
         })
     }

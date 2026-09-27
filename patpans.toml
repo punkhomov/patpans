@@ -1,5 +1,6 @@
 toggle = "F8"
 sticky = true
+tray = true
 
 groups = [
   ["A", "D"],

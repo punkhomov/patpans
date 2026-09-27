@@ -14,8 +14,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_QUIT,
+    PostQuitMessage, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_QUIT,
 };
 use windows_sys::core::BOOL;
 
@@ -55,11 +55,21 @@ static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 
 pub struct WindowsBackend {
     test_tag: Option<usize>,
+    tray: bool,
 }
 
 impl WindowsBackend {
     pub const fn new() -> Self {
-        Self { test_tag: None }
+        Self {
+            test_tag: None,
+            tray: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_tray(mut self, tray: bool) -> Self {
+        self.tray = tray;
+        self
     }
 
     #[cfg(feature = "testing")]
@@ -92,6 +102,7 @@ impl Default for WindowsBackend {
 
 impl Backend for WindowsBackend {
     fn run(&mut self, engine: Engine) -> Result<()> {
+        let enabled = engine.enabled();
         STATE.get_or_init(|| HookState {
             engine: Mutex::new(engine),
             test_tag: self.test_tag,
@@ -114,6 +125,11 @@ impl Backend for WindowsBackend {
         }
         #[cfg(feature = "testing")]
         READY.store(true, Ordering::SeqCst);
+        if self.tray
+            && let Err(err) = crate::tray::start(enabled)
+        {
+            eprintln!("patpans: tray unavailable: {err:#}");
+        }
         eprintln!(
             "patpans: low-level keyboard hook installed, toggle: {}",
             toggle_name()
@@ -129,6 +145,7 @@ impl Backend for WindowsBackend {
                 DispatchMessageW(&raw const message);
             }
         }
+        crate::tray::shutdown();
         drop(hook);
         HOOK_THREAD.store(0, Ordering::SeqCst);
         eprintln!("patpans: keyboard hook removed, exiting");
@@ -142,6 +159,28 @@ fn toggle_name() -> String {
         .and_then(|state| state.engine.lock().ok())
         .and_then(|engine| engine.toggle())
         .map_or_else(|| "none".to_string(), |key| key.to_string())
+}
+
+pub(crate) fn handle_menu_command(command: &str) {
+    match command {
+        "toggle" => {
+            let Some(state) = STATE.get() else {
+                return;
+            };
+            let Ok(mut engine) = state.engine.lock() else {
+                return;
+            };
+            let target = !engine.enabled();
+            let out = engine.set_enabled(target);
+            crate::tray::reflect(engine.enabled());
+            let state = if engine.enabled() { "ON" } else { "OFF" };
+            eprintln!("patpans: snap tap {state}");
+            drop(engine);
+            send_input(&out);
+        }
+        "quit" => unsafe { PostQuitMessage(0) },
+        _ => {}
+    }
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -167,6 +206,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let was_enabled = engine.enabled();
     let decision = hook::decide(&mut engine, key, edge);
     if was_enabled != engine.enabled() {
+        crate::tray::reflect(engine.enabled());
         let state = if engine.enabled() { "ON" } else { "OFF" };
         eprintln!("patpans: snap tap {state}");
     }
