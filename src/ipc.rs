@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -117,14 +117,14 @@ impl Client {
         Self::connect_with_timeout(endpoint, CLIENT_TIMEOUT)
     }
 
+    /// Connects and arms best-effort I/O timeouts. Transports without timeout
+    /// support (Windows named pipes) ignore the request.
     pub fn connect_with_timeout(endpoint: Option<&str>, timeout: Duration) -> Result<Self> {
         let mut stream = transport::connect(endpoint)
             .context("failed to connect to the patpans daemon (is it running?)")?;
-        stream
-            .set_read_timeout(Some(timeout))
+        arm_timeout(stream.set_read_timeout(Some(timeout)))
             .context("failed to arm the IPC read timeout")?;
-        stream
-            .set_write_timeout(Some(timeout))
+        arm_timeout(stream.set_write_timeout(Some(timeout)))
             .context("failed to arm the IPC write timeout")?;
         Ok(Self {
             reader: BufReader::new(stream),
@@ -153,6 +153,14 @@ impl Client {
             );
         }
         Ok(response)
+    }
+}
+
+fn arm_timeout(result: io::Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -281,14 +289,11 @@ pub mod transport {
 #[cfg(windows)]
 pub mod transport {
     use std::io::{self, Read, Write};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use interprocess::local_socket::{
         GenericNamespaced, ListenerOptions, Stream as IpcStream, prelude::*,
     };
-
-    const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
     fn endpoint(explicit: Option<&str>) -> String {
         explicit.map_or_else(
@@ -302,12 +307,11 @@ pub mod transport {
         name: String,
     }
 
-    /// Named pipes do not support I/O timeouts, so the stream is nonblocking
-    /// underneath and `Read`/`Write` retry with a deadline instead.
-    pub struct Stream {
-        inner: IpcStream,
-        timeout: Option<Duration>,
-    }
+    /// Named pipes do not support I/O timeouts, and interprocess's nonblocking
+    /// mode reports "no data yet" as EOF, so this stream stays blocking.
+    /// Connection lifetime is bounded by the daemon's client limit and by
+    /// clients closing after each request.
+    pub struct Stream(IpcStream);
 
     pub fn listen(explicit: Option<&str>) -> io::Result<Listener> {
         let name = endpoint(explicit);
@@ -319,7 +323,7 @@ pub mod transport {
 
     impl Listener {
         pub fn accept(&self) -> io::Result<Stream> {
-            self.listener.accept().map(Stream::new)
+            self.listener.accept().map(Stream)
         }
 
         /// Connects to this listener to unblock a pending `accept`.
@@ -332,77 +336,38 @@ pub mod transport {
     pub fn connect(explicit: Option<&str>) -> io::Result<Stream> {
         let name = endpoint(explicit);
         let name = name.as_str().to_ns_name::<GenericNamespaced>()?;
-        IpcStream::connect(name).map(Stream::new)
+        IpcStream::connect(name).map(Stream)
     }
 
     impl Stream {
-        fn new(inner: IpcStream) -> Self {
-            let _ = inner.set_nonblocking(true);
-            Self {
-                inner,
-                timeout: None,
-            }
+        pub fn set_read_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "named pipes do not support I/O timeouts",
+            ))
         }
 
-        pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-            self.timeout = timeout;
-            Ok(())
+        pub fn set_write_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "named pipes do not support I/O timeouts",
+            ))
         }
-
-        pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-            self.timeout = timeout;
-            Ok(())
-        }
-
-        fn deadline(&self) -> Option<Instant> {
-            self.timeout
-                .and_then(|timeout| Instant::now().checked_add(timeout))
-        }
-    }
-
-    fn wait(deadline: Option<Instant>, what: &str) -> io::Result<()> {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("the patpans IPC {what} timed out"),
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-        Ok(())
     }
 
     impl Read for Stream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let deadline = self.deadline();
-            loop {
-                match self.inner.read(buf) {
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        wait(deadline, "read")?;
-                    }
-                    other => return other,
-                }
-            }
+            self.0.read(buf)
         }
     }
 
     impl Write for Stream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let deadline = self.deadline();
-            loop {
-                match self.inner.write(buf) {
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        wait(deadline, "write")?;
-                    }
-                    Ok(0) if !buf.is_empty() => {
-                        wait(deadline, "write")?;
-                    }
-                    other => return other,
-                }
-            }
+            self.0.write(buf)
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.inner.flush()
+            self.0.flush()
         }
     }
 }
