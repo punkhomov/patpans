@@ -190,6 +190,7 @@ impl Engine {
         let other = 1 - slot;
         if self.sticky && state.held[other] {
             state.active = Some(other);
+            out.push(Event::new(key, Edge::Release));
             out.push(Event::new(self.groups[group_id].keys[other], Edge::Press));
         } else {
             state.active = None;

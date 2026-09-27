@@ -53,6 +53,7 @@ fn sticky_restores_a_key_that_is_still_held() {
             event("A", Edge::Press),
             event("A", Edge::Release),
             event("D", Edge::Press),
+            event("D", Edge::Release),
             event("A", Edge::Press),
             event("A", Edge::Release),
         ]
@@ -67,9 +68,11 @@ fn rapid_taps_alternate_between_keys() {
             event("A", Edge::Press),
             event("A", Edge::Release),
             event("D", Edge::Press),
+            event("D", Edge::Release),
             event("A", Edge::Press),
             event("A", Edge::Release),
             event("D", Edge::Press),
+            event("D", Edge::Release),
             event("A", Edge::Press),
             event("A", Edge::Release),
         ]
@@ -99,6 +102,7 @@ fn keyboard_repeat_is_forwarded_only_for_the_active_key() {
             event("A", Edge::Press),
             event("A", Edge::Release),
             event("D", Edge::Press),
+            event("D", Edge::Release),
             event("A", Edge::Press),
             event("A", Edge::Release),
         ]

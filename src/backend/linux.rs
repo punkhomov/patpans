@@ -110,11 +110,18 @@ impl Backend for LinuxBackend {
                 let state = if engine.enabled() { "ON" } else { "OFF" };
                 eprintln!("patpans: snap tap {state}");
             }
+            let mut inputs = Vec::with_capacity(out.len());
             for event in out {
                 let value = i32::from(event.edge == Edge::Press);
-                let input = InputEvent::new(EventType::KEY.0, event.key.linux_code, value);
-                if let Err(err) = virtual_device.emit(&[input]) {
-                    eprintln!("patpans: failed to emit `{}`: {err}", event.key);
+                inputs.push(InputEvent::new(
+                    EventType::KEY.0,
+                    event.key.linux_code,
+                    value,
+                ));
+            }
+            if !inputs.is_empty() {
+                if let Err(err) = virtual_device.emit(&inputs) {
+                    eprintln!("patpans: failed to emit {} event(s): {err}", inputs.len());
                 }
             }
         }

@@ -133,8 +133,8 @@ fn end_to_end_over_a_virtual_keyboard() {
     let script = [
         ("A", 1),
         ("D", 1),
-        ("A", 0),
         ("D", 0),
+        ("A", 0),
         ("Q", 1),
         ("Q", 0),
         ("F8", 1),
@@ -153,6 +153,8 @@ fn end_to_end_over_a_virtual_keyboard() {
         ("A", 0),
         ("D", 1),
         ("D", 0),
+        ("A", 1),
+        ("A", 0),
         ("Q", 1),
         ("Q", 0),
         ("W", 1),
