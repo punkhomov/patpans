@@ -151,31 +151,31 @@ impl Engine {
         let state = &mut self.states[group_id];
         if state.held[slot] {
             if state.active == Some(slot) {
-                out.push(Event::new(key, Edge::Press));
+                push_unique(out, Event::new(key, Edge::Press));
             }
             return;
         }
         state.held[slot] = true;
         state.last_pressed = Some(slot);
         if state.active == Some(slot) {
-            out.push(Event::new(key, Edge::Press));
+            push_unique(out, Event::new(key, Edge::Press));
             return;
         }
         if let Some(active) = state.active {
-            out.push(Event::new(
-                self.groups[group_id].keys[active],
-                Edge::Release,
-            ));
+            push_unique(
+                out,
+                Event::new(self.groups[group_id].keys[active], Edge::Release),
+            );
         }
         state.active = Some(slot);
-        out.push(Event::new(key, Edge::Press));
+        push_unique(out, Event::new(key, Edge::Press));
     }
 
     fn on_release(&mut self, group_id: usize, slot: usize, out: &mut Vec<Event>) {
         let key = self.groups[group_id].keys[slot];
         let state = &mut self.states[group_id];
         if !state.held[slot] {
-            out.push(Event::new(key, Edge::Release));
+            push_unique(out, Event::new(key, Edge::Release));
             return;
         }
         state.held[slot] = false;
@@ -189,11 +189,14 @@ impl Engine {
         let other = 1 - slot;
         if self.sticky && state.held[other] {
             state.active = Some(other);
-            out.push(Event::new(key, Edge::Release));
-            out.push(Event::new(self.groups[group_id].keys[other], Edge::Press));
+            push_unique(out, Event::new(key, Edge::Release));
+            push_unique(
+                out,
+                Event::new(self.groups[group_id].keys[other], Edge::Press),
+            );
         } else {
             state.active = None;
-            out.push(Event::new(key, Edge::Release));
+            push_unique(out, Event::new(key, Edge::Release));
         }
     }
 
@@ -220,14 +223,14 @@ impl Engine {
     fn resync_active(&mut self) -> Vec<Event> {
         let mut out = Vec::new();
         for (group_id, state) in self.states.iter_mut().enumerate() {
-            state.active = match state.last_pressed {
-                Some(slot) if state.held[slot] => Some(slot),
-                _ => (0..2).find(|&slot| state.held[slot]),
-            };
+            state.active = Self::compute_active(state);
             if let Some(active) = state.active {
                 for slot in 0..2 {
                     if state.held[slot] && slot != active {
-                        out.push(Event::new(self.groups[group_id].keys[slot], Edge::Release));
+                        push_unique(
+                            &mut out,
+                            Event::new(self.groups[group_id].keys[slot], Edge::Release),
+                        );
                     }
                 }
             }
@@ -241,13 +244,65 @@ impl Engine {
             if let Some(active) = state.active {
                 for slot in 0..2 {
                     if state.held[slot] && slot != active {
-                        out.push(Event::new(self.groups[group_id].keys[slot], Edge::Press));
+                        push_unique(
+                            &mut out,
+                            Event::new(self.groups[group_id].keys[slot], Edge::Press),
+                        );
                     }
                 }
             }
             state.active = None;
         }
         out
+    }
+
+    fn compute_active(state: &GroupState) -> Option<usize> {
+        match state.last_pressed {
+            Some(slot) if state.held[slot] => Some(slot),
+            _ => (0..2).find(|&slot| state.held[slot]),
+        }
+    }
+
+    pub fn held_keys(&self) -> Vec<Key> {
+        let mut keys = Vec::new();
+        for (group, state) in self.groups.iter().zip(&self.states) {
+            for slot in 0..2 {
+                if state.held[slot] && state.last_pressed != Some(slot) {
+                    keys.push(group.keys[slot]);
+                }
+            }
+            if let Some(last) = state.last_pressed
+                && state.held[last]
+            {
+                keys.push(group.keys[last]);
+            }
+        }
+        keys
+    }
+
+    pub fn resync_held(&mut self, held: &[Key]) {
+        for key in held {
+            let Some(group_ids) = self.index.get(key).cloned() else {
+                continue;
+            };
+            for group_id in group_ids {
+                let Some(slot) = self.group_slot(group_id, *key) else {
+                    continue;
+                };
+                let state = &mut self.states[group_id];
+                state.held[slot] = true;
+                state.last_pressed = Some(slot);
+            }
+        }
+        for state in &mut self.states {
+            state.active = Self::compute_active(state);
+        }
+    }
+}
+
+fn push_unique(out: &mut Vec<Event>, event: Event) {
+    if !out.contains(&event) {
+        out.push(event);
     }
 }
 
@@ -294,5 +349,61 @@ mod tests {
             }
         }
         assert_eq!(produced, 120_000);
+    }
+
+    #[test]
+    fn shared_keys_do_not_duplicate_events() {
+        let mut engine = Engine::new(
+            vec![
+                Group::new(key("A"), key("D")),
+                Group::new(key("A"), key("W")),
+            ],
+            None,
+            true,
+        );
+        assert_eq!(
+            engine.handle(Event::new(key("A"), Edge::Press)),
+            vec![Event::new(key("A"), Edge::Press)]
+        );
+    }
+
+    #[test]
+    fn reload_resyncs_held_keys() {
+        let mut engine = Engine::new(vec![Group::new(key("A"), key("D"))], None, true);
+        assert_eq!(
+            engine.handle(Event::new(key("A"), Edge::Press)),
+            vec![Event::new(key("A"), Edge::Press)]
+        );
+        let held = engine.held_keys();
+        assert_eq!(held, vec![key("A")]);
+
+        let mut next = Engine::new(vec![Group::new(key("A"), key("D"))], None, true);
+        next.resync_held(&held);
+        assert_eq!(
+            next.handle(Event::new(key("D"), Edge::Press)),
+            vec![
+                Event::new(key("A"), Edge::Release),
+                Event::new(key("D"), Edge::Press),
+            ]
+        );
+        assert_eq!(
+            next.handle(Event::new(key("D"), Edge::Release)),
+            vec![
+                Event::new(key("D"), Edge::Release),
+                Event::new(key("A"), Edge::Press),
+            ]
+        );
+        assert_eq!(
+            next.handle(Event::new(key("A"), Edge::Release)),
+            vec![Event::new(key("A"), Edge::Release)]
+        );
+    }
+
+    #[test]
+    fn held_keys_follow_the_press_order() {
+        let mut engine = Engine::new(vec![Group::new(key("A"), key("D"))], None, true);
+        engine.handle(Event::new(key("A"), Edge::Press));
+        engine.handle(Event::new(key("D"), Edge::Press));
+        assert_eq!(engine.held_keys(), vec![key("A"), key("D")]);
     }
 }

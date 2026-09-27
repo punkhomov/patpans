@@ -71,7 +71,7 @@ tray = true        # иконка в системном трее
 groups = [["A", "D"], ["W", "S"]]
 ```
 
-Флаги CLI: `--config <PATH>`, `run --toggle <KEY> --groups "A,D;W,S" --no-sticky --no-tray`, `simulate --script <SCRIPT> --builtin <NAME>`. Имена клавиш — как в таблице `src/keys.rs` (`A`..`Z`, `Left`, `Space`, `F8`, ...), есть алиасы (`ctrl`, `esc`, `arrowleft`).
+Флаги CLI: `--config <PATH>`, `run --toggle <KEY> --groups "A,D;W,S" --no-sticky --no-tray`, `simulate --script <SCRIPT> --builtin <NAME>`. Имена клавиш — как в таблице `src/keys.rs` (`A`..`Z`, `Left`, `Space`, `F8`, ...), есть алиасы (`ctrl`, `esc`, `arrowleft`). Клавиша может входить только в одну группу — конфиг с пересечениями отклоняется.
 
 ## min-publish-age
 
@@ -89,7 +89,7 @@ min-publish-age = "14 days"
 
 ## Тестирование
 
-Логика покрыта 40 тестами (включая модель настроек GUI): юнит-тесты (правила хука, портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
+Логика покрыта 44 тестами (включая модель настроек GUI): юнит-тесты (правила хука, портативные пути), интеграционные сценарии на симуляторе и headless-тесты демона с IPC. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`) — включая цикл Stop/Start со снятием и повторным захватом клавиатуры; Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
 
 Подробный отчёт: что именно проверено, как воспроизвести, что не покрыто — в [TESTING.md](TESTING.md).
 

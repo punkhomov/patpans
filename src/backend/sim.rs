@@ -101,7 +101,11 @@ impl Backend for SimBackend {
                         let _ = reply.send(());
                     }
                     Command::Replace(config, reply) => {
-                        engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+                        let held = engine.held_keys();
+                        let mut next =
+                            Engine::new(config.groups.clone(), config.toggle, config.sticky);
+                        next.resync_held(&held);
+                        engine = next;
                         control.set_status(engine.enabled());
                         let _ = reply.send(());
                     }

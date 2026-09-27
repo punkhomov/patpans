@@ -99,7 +99,7 @@ impl LinuxBackend {
     }
 }
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code, reason = "borrowing the raw fd of a live evdev device")]
 fn read_device(
     device: &mut evdev::Device,
     tx: &mpsc::SyncSender<(u16, i32)>,
@@ -112,6 +112,7 @@ fn read_device(
             return;
         }
         let mut fds = [PollFd::new(
+            // SAFETY: the fd stays valid for the whole loop because `device` owns it.
             unsafe { BorrowedFd::borrow_raw(fd) },
             PollFlags::POLLIN,
         )];
@@ -126,8 +127,18 @@ fn read_device(
         match device.fetch_events() {
             Ok(events) => {
                 for event in events {
-                    if tx.send((event.code(), event.value())).is_err() {
-                        return;
+                    let pending = (event.code(), event.value());
+                    loop {
+                        match tx.try_send(pending) {
+                            Ok(()) => break,
+                            Err(mpsc::TrySendError::Full(_)) => {
+                                if stop.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => return,
+                        }
                     }
                 }
             }
@@ -172,7 +183,10 @@ impl Runtime {
                 out
             }
             Command::Replace(config, reply) => {
-                self.engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+                let held = self.engine.held_keys();
+                let mut engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+                engine.resync_held(&held);
+                self.engine = engine;
                 reflect(&self.engine, control);
                 crate::log!("patpans: settings applied");
                 let _ = reply.send(());

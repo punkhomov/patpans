@@ -258,7 +258,10 @@ fn status_info(shared: &Shared) -> StatusInfo {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "Win32 token query to report elevation in the daemon status"
+)]
 fn elevated() -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
@@ -267,12 +270,15 @@ fn elevated() -> bool {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the current process pseudo-handle is always valid and `token` is an out-param.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
         return false;
     }
     let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
     let size = u32::try_from(std::mem::size_of::<TOKEN_ELEVATION>()).unwrap_or_default();
     let mut returned = 0_u32;
+    // SAFETY: `token` is a valid handle from OpenProcessToken and the buffer matches
+    // the requested TOKEN_ELEVATION size.
     let ok = unsafe {
         GetTokenInformation(
             token,
@@ -282,6 +288,7 @@ fn elevated() -> bool {
             &raw mut returned,
         )
     };
+    // SAFETY: `token` was opened above and is closed exactly once.
     unsafe { CloseHandle(token) };
     ok != 0 && elevation.TokenIsElevated != 0
 }

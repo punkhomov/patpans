@@ -101,7 +101,10 @@ pub fn start_daemon() -> Result<()> {
 }
 
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(
+    unsafe_code,
+    reason = "ShellExecuteW is the only way to trigger a UAC elevation"
+)]
 pub fn start_daemon_elevated() -> Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -117,6 +120,8 @@ pub fn start_daemon_elevated() -> Result<()> {
     let file = wide(exe.as_os_str());
     let verb = wide(OsStr::new("runas"));
     let params = wide(OsStr::new("run"));
+    // SAFETY: all pointers are null-terminated UTF-16 buffers that outlive the call;
+    // a null window handle and SW_SHOWNORMAL are valid for ShellExecuteW.
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),

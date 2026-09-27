@@ -122,20 +122,44 @@ pub mod transport {
     use std::io::{self, Read, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use nix::unistd::Uid;
 
-    fn endpoint(explicit: Option<&str>) -> PathBuf {
+    fn resolve(explicit: Option<&str>) -> (PathBuf, Option<PathBuf>) {
         if let Some(path) = explicit {
-            return PathBuf::from(path);
+            return (PathBuf::from(path), None);
         }
         if let Ok(path) = std::env::var("PAT_PANS_SOCKET") {
-            return PathBuf::from(path);
+            return (PathBuf::from(path), None);
         }
-        match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(dir) => PathBuf::from(dir).join("patpans.sock"),
-            None => PathBuf::from(format!("/tmp/patpans-{}.sock", Uid::effective().as_raw())),
+        let uid = Uid::effective().as_raw();
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let dir = PathBuf::from(dir);
+            return (dir.join("patpans.sock"), None);
+        }
+        let runtime = PathBuf::from(format!("/run/user/{uid}"));
+        if runtime.is_dir() {
+            return (runtime.join("patpans.sock"), None);
+        }
+        let fallback = std::env::temp_dir().join(format!("patpans-{uid}"));
+        (fallback.join("patpans.sock"), Some(fallback))
+    }
+
+    fn private_dir(path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if !meta.file_type().is_dir() || meta.uid() != Uid::effective().as_raw() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the patpans socket directory is not safe to use",
+                    ));
+                }
+                Ok(())
+            }
+            Err(_) => fs::DirBuilder::new().mode(0o700).create(path),
         }
     }
 
@@ -147,7 +171,10 @@ pub mod transport {
     pub struct Stream(UnixStream);
 
     pub fn listen(explicit: Option<&str>) -> io::Result<Listener> {
-        let path = endpoint(explicit);
+        let (path, managed_dir) = resolve(explicit);
+        if let Some(dir) = managed_dir {
+            private_dir(&dir)?;
+        }
         if path.exists() {
             if UnixStream::connect(&path).is_ok() {
                 return Err(io::Error::new(
@@ -175,7 +202,7 @@ pub mod transport {
     }
 
     pub fn connect(explicit: Option<&str>) -> io::Result<Stream> {
-        UnixStream::connect(endpoint(explicit)).map(Stream)
+        UnixStream::connect(resolve(explicit).0).map(Stream)
     }
 
     impl Read for Stream {

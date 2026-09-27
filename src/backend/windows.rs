@@ -1,4 +1,7 @@
-#![allow(unsafe_code)]
+#![expect(
+    unsafe_code,
+    reason = "direct Win32 FFI: low-level hook, message pump, SendInput and console handler"
+)]
 
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -43,6 +46,7 @@ struct HookGuard(HHOOK);
 
 impl Drop for HookGuard {
     fn drop(&mut self) {
+        // SAFETY: the handle was returned by SetWindowsHookExW and is unhooked exactly once.
         unsafe { UnhookWindowsHookEx(self.0) };
     }
 }
@@ -51,6 +55,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
         let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
         if thread_id != 0 {
+            // SAFETY: thread_id belongs to the hook thread; posting WM_QUIT to it is allowed.
             unsafe { PostThreadMessageW(thread_id, WM_QUIT, 0, 0) };
         }
         return 1;
@@ -139,17 +144,22 @@ impl Backend for WindowsBackend {
                 test_tag: self.test_tag,
             });
         }
+        // SAFETY: returns the id of the calling thread; no preconditions.
         HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
         if let Some(control) = &self.control {
             control.set_wake(|| {
                 let thread_id = HOOK_THREAD.load(Ordering::SeqCst);
                 if thread_id != 0 {
+                    // SAFETY: thread_id is the hook thread id stored above.
                     unsafe { PostThreadMessageW(thread_id, WAKE_MESSAGE, 0, 0) };
                 }
             });
             control.set_status(enabled);
         }
+        // SAFETY: a null module name asks for the handle of the current executable.
         let module = unsafe { GetModuleHandleW(ptr::null()) };
+        // SAFETY: the callback has the required signature and stays alive for the process;
+        // the module handle is the current executable, as required for a global hook.
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0) };
         if hook.is_null() {
             bail!(
@@ -159,6 +169,7 @@ impl Backend for WindowsBackend {
         }
         let hook = HookGuard(hook);
         if !CONSOLE_HANDLER.swap(true, Ordering::SeqCst)
+            // SAFETY: the handler has the required signature and is registered once.
             && unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 1) } == 0
         {
             crate::log!(
@@ -179,6 +190,8 @@ impl Backend for WindowsBackend {
         );
         let mut message = MSG::default();
         loop {
+            // SAFETY: `message` is a valid MSG and the null window handle requests
+            // messages for the calling thread, including the hook and wake messages.
             let result = unsafe { GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) };
             if result <= 0 {
                 break;
@@ -187,6 +200,8 @@ impl Backend for WindowsBackend {
                 handle_commands(self.commands.as_ref());
                 continue;
             }
+            // SAFETY: `message` was filled by GetMessageW; translation is a no-op for
+            // keyboard hook messages but is required by the message-loop contract.
             unsafe {
                 TranslateMessage(&raw const message);
                 DispatchMessageW(&raw const message);
@@ -219,7 +234,10 @@ fn handle_commands(commands: Option<&mpsc::Receiver<Command>>) {
             Command::Replace(config, reply) => apply_config(&config, &reply),
             Command::Capture(reply) => set_capture(Some(reply)),
             Command::CaptureCancel => set_capture(None),
-            Command::Stop => unsafe { PostQuitMessage(0) },
+            Command::Stop => {
+                // SAFETY: posts WM_QUIT to the calling (hook) thread's message queue.
+                unsafe { PostQuitMessage(0) };
+            }
         }
     }
 }
@@ -246,7 +264,10 @@ fn apply_config(config: &Config, reply: &mpsc::Sender<()>) {
     if let Some(state) = STATE.get()
         && let Ok(mut engine) = state.engine.lock()
     {
-        *engine = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+        let held = engine.held_keys();
+        let mut next = Engine::new(config.groups.clone(), config.toggle, config.sticky);
+        next.resync_held(&held);
+        *engine = next;
         update_status(state, &engine);
     }
     crate::log!("patpans: settings applied");
@@ -303,6 +324,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     let Some(state) = STATE.get() else {
         return call_next(code, wparam, lparam);
     };
+    // SAFETY: for a WH_KEYBOARD_LL hook the OS guarantees that `lparam` points to a
+    // KBDLLHOOKSTRUCT valid for the duration of this callback.
     let info = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
     let input = HookInput {
         message: u32::try_from(wparam).unwrap_or_default(),
@@ -349,6 +372,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY: passing the original arguments through to the next hook is always valid.
     unsafe { CallNextHookEx(ptr::null_mut(), code, wparam, lparam) }
 }
 
@@ -373,11 +397,19 @@ fn send_input(events: &[Event]) {
         })
         .collect();
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    unsafe {
+    let sent = unsafe {
+        // SAFETY: `inputs` is a valid contiguous array of INPUT of the exact size passed,
+        // and `SendInput` copies the data before returning.
         SendInput(
             inputs.len() as u32,
             inputs.as_ptr(),
             std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if usize::try_from(sent).unwrap_or_default() != inputs.len() {
+        crate::log!(
+            "patpans: SendInput injected {sent} of {} event(s) — input may be blocked by UIPI",
+            inputs.len()
         );
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -88,6 +89,7 @@ impl FileConfig {
     pub fn into_config(self) -> Result<Config> {
         let toggle = parse_toggle(&self.toggle)?;
         let mut groups = Vec::with_capacity(self.groups.len());
+        let mut seen: HashMap<Key, usize> = HashMap::new();
         for (index, pair) in self.groups.iter().enumerate() {
             if pair.len() != 2 {
                 bail!(
@@ -102,6 +104,14 @@ impl FileConfig {
                 .with_context(|| format!("group #{}: unknown key `{}`", index + 1, pair[1]))?;
             if first == second {
                 bail!("group #{} contains `{first}` twice", index + 1);
+            }
+            for key in [first, second] {
+                if let Some(previous) = seen.insert(key, index + 1) {
+                    bail!(
+                        "key `{key}` is used in group #{previous} and group #{}; a key may belong to only one group",
+                        index + 1
+                    );
+                }
             }
             groups.push(Group::new(first, second));
         }
@@ -201,6 +211,12 @@ mod tests {
         assert!(parsed.into_config().is_err());
         assert!(parse_groups("A,D;W").is_err());
         assert!(parse_groups("").is_err());
+    }
+
+    #[test]
+    fn rejects_keys_shared_between_groups() {
+        let parsed: FileConfig = toml::from_str(r#"groups = [["A", "D"], ["A", "W"]]"#).unwrap();
+        assert!(parsed.into_config().is_err());
     }
 
     #[test]
