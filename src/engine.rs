@@ -89,8 +89,7 @@ impl Engine {
         }
         self.enabled = enabled;
         if enabled {
-            self.resync_active();
-            Vec::new()
+            self.resync_active()
         } else {
             self.restore_physical()
         }
@@ -218,13 +217,22 @@ impl Engine {
         }
     }
 
-    fn resync_active(&mut self) {
-        for state in &mut self.states {
+    fn resync_active(&mut self) -> Vec<Event> {
+        let mut out = Vec::new();
+        for (group_id, state) in self.states.iter_mut().enumerate() {
             state.active = match state.last_pressed {
                 Some(slot) if state.held[slot] => Some(slot),
                 _ => (0..2).find(|&slot| state.held[slot]),
             };
+            if let Some(active) = state.active {
+                for slot in 0..2 {
+                    if state.held[slot] && slot != active {
+                        out.push(Event::new(self.groups[group_id].keys[slot], Edge::Release));
+                    }
+                }
+            }
         }
+        out
     }
 
     fn restore_physical(&mut self) -> Vec<Event> {

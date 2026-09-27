@@ -126,6 +126,20 @@ fn toggle_disables_and_restores_the_physical_state() {
             event("A", Edge::Release),
             event("D", Edge::Press),
             event("A", Edge::Press),
+            event("A", Edge::Release),
+            event("D", Edge::Release),
+        ]
+    );
+}
+
+#[test]
+fn enabling_while_both_keys_are_held_does_not_stick_the_suppressed_key() {
+    assert_eq!(
+        replay("F8+ F8- A+ D+ F8+ F8- A- D-"),
+        vec![
+            event("A", Edge::Press),
+            event("D", Edge::Press),
+            event("A", Edge::Release),
             event("D", Edge::Release),
         ]
     );

@@ -56,7 +56,7 @@ min-publish-age = "14 days"
 
 ## Тестирование
 
-Логика покрыта 29 тестами: юнит-тесты (включая кроссплатформенные правила хука) и интеграционные сценарии на симуляторе. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`), Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
+Логика покрыта 31 тестом: юнит-тесты (включая кроссплатформенные правила хука) и интеграционные сценарии на симуляторе. Linux-бэкенд проверяется настоящим e2e через виртуальную клавиатуру `uinput` в мини-VM (`./scripts/e2e-qemu.sh`), Windows-бэкенд — отдельным e2e на живом Windows: `scripts/e2e-windows.ps1` (`cargo test --features testing --test windows_hook_e2e`).
 
 Подробный отчёт: что именно проверено, как воспроизвести, что не покрыто — в [TESTING.md](TESTING.md).
 

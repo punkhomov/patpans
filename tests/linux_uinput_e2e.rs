@@ -159,6 +159,7 @@ fn end_to_end_over_a_virtual_keyboard() {
         ("Q", 0),
         ("W", 1),
         ("S", 1),
+        ("W", 0),
         ("S", 0),
     ]
     .iter()
